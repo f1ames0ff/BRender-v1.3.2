@@ -1,4 +1,4 @@
-﻿project(inc C)
+project(inc C)
 
 target_include_directories(brender-inc INTERFACE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -18,7 +18,7 @@ set(GENERATED_FILES
     toktype.c
 )
 
-if(PERL_EXECUABLE AND EXISTS "${PERL_EXECUTABLE}")
+if(PERL_EXECUTABLE AND EXISTS "${PERL_EXECUTABLE}")
         # Generate pretok.h, pretok_c.h, and toktype.c in build directory
         # NOTE: the paths in the source tree are not added to OUTPUTS.
         #       This is done such that the clean target does not remove these.

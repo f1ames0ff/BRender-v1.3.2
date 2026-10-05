@@ -1,4 +1,4 @@
-﻿project(fw C)
+project(fw C)
 
 # #
 # A bit hacky, but there's ONE file in softrend that needs to be in the DDI.
@@ -21,7 +21,7 @@ set(GENERATED_FILES
     ddi/dev_objs.cgh
 )
 
-if(PERL_EXECUABLE AND EXISTS "${PERL_EXECUTABLE}")
+if(PERL_EXECUTABLE AND EXISTS "${PERL_EXECUTABLE}")
     # Generate dev_objs.cgh in build directory
     # NOTE: the file in the source tree are not added to OUTPUTS.
     #       This is done such that the clean target does not remove these.
@@ -113,6 +113,10 @@ set(FW_FILES
         fw.h
         fw_ip.h
 )
+
+if(BRENDER_METHOD_CENSUS)
+        list(APPEND FW_FILES method_census.c)
+endif()
 
 add_library(fw OBJECT ${FW_FILES} ${FW_DEV_FILES})
 

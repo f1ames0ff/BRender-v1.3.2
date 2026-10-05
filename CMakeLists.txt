@@ -17,6 +17,12 @@ option(BRENDER_BUILD_EXAMPLES "Build Examples" "${BRender_IS_TOPLEVEL}")
 option(BRENDER_INSTALL "Enable installation" "${BRender_IS_TOPLEVEL}")
 option(BRENDER_ASAN_ENABLED "Address Sanitizer" OFF)
 
+option(BRENDER_METHOD_CENSUS "Count DDI method calls dispatched by the core" OFF)
+
+if(BRENDER_METHOD_CENSUS)
+    add_compile_definitions(BR_METHOD_CENSUS)
+endif()
+
 add_subdirectory(core)
 
 if(CMAKE_C_BYTE_ORDER STREQUAL "BIG_ENDIAN")

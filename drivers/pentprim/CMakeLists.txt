@@ -1,6 +1,6 @@
-﻿project(pentprim C)
+project(pentprim C)
 
-if(PERL_EXECUABLE AND EXISTS "${PERL_EXECUTABLE}")
+if(PERL_EXECUTABLE AND EXISTS "${PERL_EXECUTABLE}")
     set(INFOGEN ${CMAKE_CURRENT_SOURCE_DIR}/infogen.pl)
     set(PRIM_FILES ${CMAKE_CURRENT_SOURCE_DIR}/prim_t8.ifg)
 

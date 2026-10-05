@@ -481,7 +481,12 @@ typedef float br_float;
 
 #define BR_CMETHOD(t,m)					(_M_##t##_##m)
 #define BR_CMETHOD_REF(t,m) 		((void *)_M_##t##_##m)
+#ifdef BR_METHOD_CENSUS
+void BrMethodCensusHit(const char *method);
+#define BR_CMETHOD_CALL(t,m,o) 		(BrMethodCensusHit(#t "." #m), ((t *)(o))->dispatch->_##m)
+#else
 #define BR_CMETHOD_CALL(t,m,o) 		(((t *)(o))->dispatch->_##m)
+#endif
 
 /*
  * Backwards compatability
