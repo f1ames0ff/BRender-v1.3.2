@@ -2,4 +2,5 @@
 add_subdirectory(pentprim)
 add_subdirectory(virtual_fb)
 add_subdirectory(glrend)
-target_link_libraries(brender-full INTERFACE softrend pentprim virtual_fb glrend )
+add_subdirectory(vkrend)
+target_link_libraries(brender-full INTERFACE softrend pentprim virtual_fb glrend vkrend )

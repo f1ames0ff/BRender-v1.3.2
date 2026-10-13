@@ -31,4 +31,22 @@ typedef struct br_device_gl_callback_procs {
     br_device_gl_free_cbfn                *free;
 } br_device_gl_callback_procs;
 
+typedef br_boolean BR_CALLBACK br_device_vkrend_load_library_cbfn(const char* path);
+typedef void BR_CALLBACK br_device_vkrend_unload_library_cbfn(void);
+typedef void* BR_CALLBACK br_device_vkrend_get_vk_get_instance_proc_addr_cbfn(void);
+typedef const char* BR_CALLBACK br_device_vkrend_get_error_cbfn(void);
+typedef br_boolean BR_CALLBACK br_device_vkrend_get_instance_extensions_cbfn(void* window, br_uint_32* count, const char** names, br_uint_32 max_names);
+typedef br_boolean BR_CALLBACK br_device_vkrend_create_surface_cbfn(void* window, void* instance, void** surface);
+
+typedef struct br_device_vkrend_callback_procs {
+    br_uint_32 size;
+    void* window;
+    br_device_vkrend_load_library_cbfn* load_library;
+    br_device_vkrend_unload_library_cbfn* unload_library;
+    br_device_vkrend_get_vk_get_instance_proc_addr_cbfn* get_vk_get_instance_proc_addr;
+    br_device_vkrend_get_error_cbfn* get_error;
+    br_device_vkrend_get_instance_extensions_cbfn* get_instance_extensions;
+    br_device_vkrend_create_surface_cbfn* create_surface;
+} br_device_vkrend_callback_procs;
+
 #endif
