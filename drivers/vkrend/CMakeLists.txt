@@ -1,9 +1,24 @@
 project(vkrend C)
 
+if(NOT VKREND_VULKAN_INCLUDE_DIR)
+    message(FATAL_ERROR "VKREND_VULKAN_INCLUDE_DIR is empty; set it to the directory containing the Vulkan headers")
+endif()
+
+if(NOT IS_DIRECTORY "${VKREND_VULKAN_INCLUDE_DIR}")
+    message(FATAL_ERROR "VKREND_VULKAN_INCLUDE_DIR is not a directory: ${VKREND_VULKAN_INCLUDE_DIR}")
+endif()
+
 set(VKREND_FILES
         driver.c
         device.c
         device.h
+        video.c
+        video.h
+        outfcty.c
+        outfcty.h
+        devpixmp.c
+        devpixmp.h
+        vkshaders.h
         drv.h
         drv_ip.h
         template.h
@@ -41,6 +56,8 @@ get_target_property(target_type vkrend TYPE)
 if(target_type STREQUAL SHARED_LIBRARY)
     target_compile_definitions(vkrend PRIVATE -DDEFINE_BR_ENTRY_POINT)
 endif()
+
+target_include_directories(vkrend PRIVATE ${VKREND_VULKAN_INCLUDE_DIR})
 
 target_link_libraries(vkrend PRIVATE BRender::DDI)
 target_link_libraries(vkrend PUBLIC vkrend-headers)

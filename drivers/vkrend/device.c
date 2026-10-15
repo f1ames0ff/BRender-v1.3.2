@@ -43,6 +43,7 @@ struct token_match {
     br_int_32 n;
     void* extra;
     br_size_t extra_size;
+    br_token* insignificant;
 };
 
 br_device* DeviceVkAllocate(const char* identifier, const char* arguments) {
@@ -59,6 +60,13 @@ br_device* DeviceVkAllocate(const char* identifier, const char* arguments) {
     self->dispatch = &deviceDispatch;
     self->device = self;
     self->object_list = BrObjectListAllocate(self);
+
+    self->output_facility = OutputFacilityVkInit(self);
+
+    if (self->output_facility == NULL) {
+        BrResFreeNoCallback(self);
+        return NULL;
+    }
 
     return self;
 }
@@ -110,6 +118,7 @@ static void* BR_CMETHOD_DECL(br_device_vk, listQuery)(struct br_object_container
 void* BR_CMETHOD_DECL(br_device_vk, tokensMatchBegin)(struct br_device* self, br_token t, br_token_value* tv) {
     struct token_match* tm;
     br_int_32 i;
+    br_int_32 n;
 
     (void)t;
 
@@ -124,7 +133,14 @@ void* BR_CMETHOD_DECL(br_device_vk, tokensMatchBegin)(struct br_device* self, br
 
     tm->n = i + 1;
     tm->query = BrResAllocate(tm, tm->n * sizeof(br_token_value), BR_MEMORY_APPLICATION);
-    BrMemCpy(tm->query, tv, i * sizeof(br_token_value));
+    BrMemCpy(tm->query, tv, tm->n * sizeof(br_token_value));
+
+    n = BR_ASIZE(insignificantMatchTokens);
+    tm->insignificant = BrResAllocate(tm, (n + 1) * sizeof(br_token), BR_MEMORY_APPLICATION);
+    BrMemCpy(tm->insignificant, insignificantMatchTokens, n * sizeof(br_token));
+    tm->insignificant[n - 1] = BrVkrendCallbacksToken();
+    tm->insignificant[n] = BR_NULL_TOKEN;
+
     return (void*)tm;
 }
 
@@ -152,7 +168,7 @@ br_boolean BR_CMETHOD_DECL(br_device_vk, tokensMatch)(struct br_object_container
     if (tm->query[n].t != BR_NULL_TOKEN)
         return BR_FALSE;
 
-    return BrTokenValueComparePartial(tm->original, tm->query, insignificantMatchTokens);
+    return BrTokenValueComparePartial(tm->original, tm->query, tm->insignificant);
 }
 
 void BR_CMETHOD_DECL(br_device_vk, tokensMatchEnd)(struct br_object_container* self, void* arg) {

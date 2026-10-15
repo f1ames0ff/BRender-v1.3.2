@@ -16,6 +16,9 @@ option(BRENDER_BUILD_DRIVERS "Build Drivers" ON)
 option(BRENDER_BUILD_EXAMPLES "Build Examples" "${BRender_IS_TOPLEVEL}")
 option(BRENDER_INSTALL "Enable installation" "${BRender_IS_TOPLEVEL}")
 option(BRENDER_ASAN_ENABLED "Address Sanitizer" OFF)
+option(BRENDER_BUILD_VKREND "Build the vkrend Vulkan driver" OFF)
+
+set(VKREND_VULKAN_INCLUDE_DIR "" CACHE PATH "Directory containing the Vulkan headers")
 
 add_subdirectory(core)
 
