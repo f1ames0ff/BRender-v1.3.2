@@ -1338,10 +1338,42 @@ static br_error video_present_frame(br_vk_video* video, const void* pixels, br_i
 
     pCmdBeginRenderPass(video->command_buffer, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
 
-    viewport.x = 0.0f;
-    viewport.y = 0.0f;
-    viewport.width = (float)video->extent.width;
-    viewport.height = (float)video->extent.height;
+    {
+        br_int_32 frame_w = width;
+        br_int_32 frame_h = height;
+        br_int_32 view_w;
+        br_int_32 view_h;
+
+        if (frame_w <= 0 || frame_h <= 0) {
+            frame_w = (br_int_32)video->extent.width;
+            frame_h = (br_int_32)video->extent.height;
+        }
+
+        if ((br_uint_32)frame_w <= video->extent.width && (br_uint_32)frame_h <= video->extent.height) {
+            br_uint_32 scale = video->extent.width / (br_uint_32)frame_w;
+            br_uint_32 other = video->extent.height / (br_uint_32)frame_h;
+
+            if (other < scale)
+                scale = other;
+            if (scale < 1)
+                scale = 1;
+
+            view_w = frame_w * (br_int_32)scale;
+            view_h = frame_h * (br_int_32)scale;
+        } else {
+            float scale_w = (float)video->extent.width / (float)frame_w;
+            float scale_h = (float)video->extent.height / (float)frame_h;
+            float scale = scale_w < scale_h ? scale_w : scale_h;
+
+            view_w = (br_int_32)((float)frame_w * scale);
+            view_h = (br_int_32)((float)frame_h * scale);
+        }
+
+        viewport.x = (float)(((br_int_32)video->extent.width - view_w) / 2);
+        viewport.y = (float)(((br_int_32)video->extent.height - view_h) / 2);
+        viewport.width = (float)view_w;
+        viewport.height = (float)view_h;
+    }
     viewport.minDepth = 0.0f;
     viewport.maxDepth = 1.0f;
     pCmdSetViewport(video->command_buffer, 0, 1, &viewport);
