@@ -61,7 +61,14 @@ br_device* DeviceVkAllocate(const char* identifier, const char* arguments) {
     self->device = self;
     self->object_list = BrObjectListAllocate(self);
 
-    self->output_facility = OutputFacilityVkInit(self);
+    self->renderer_facility = RendererFacilityVkInit(self);
+
+    if (self->renderer_facility == NULL) {
+        BrResFreeNoCallback(self);
+        return NULL;
+    }
+
+    self->output_facility = OutputFacilityVkInit(self, self->renderer_facility);
 
     if (self->output_facility == NULL) {
         BrResFreeNoCallback(self);

@@ -15,6 +15,8 @@ typedef struct br_output_facility {
     struct br_device* device;
 
     void* object_list;
+
+    struct br_renderer_facility* renderer_facility;
 } br_output_facility;
 
 #endif

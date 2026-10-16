@@ -14,6 +14,7 @@ static struct br_tv_template_entry outputFacilityTemplateEntries[] = {
     { BRT(PIXEL_TYPE_U8), A(BR_PMT_RGB_565), BRTV_QUERY | BRTV_ALL | BRTV_ABS, BRTV_CONV_COPY, 0 },
     { BRT(INDEXED_B), A(0), BRTV_QUERY | BRTV_ALL | BRTV_ABS, BRTV_CONV_COPY, 0 },
     { BRT(IDENTIFIER_CSTR), F(identifier), BRTV_QUERY | BRTV_ALL, BRTV_CONV_COPY, 0 },
+    { BRT(RENDERER_FACILITY_O), F(renderer_facility), BRTV_QUERY | BRTV_ALL, BRTV_CONV_COPY, 0 },
     { BRT(MSAA_SAMPLES_I32), 0, BRTV_QUERY | BRTV_ALL, BRTV_CONV_DIRECT, 0 },
     { BRT(WINDOW_HANDLE_H), 0, BRTV_QUERY | BRTV_ALL, BRTV_CONV_DIRECT, 0 },
     { DEV(VKREND_CALLBACKS_P), 0, BRTV_QUERY | BRTV_ALL, BRTV_CONV_DIRECT, 0 },
@@ -22,7 +23,7 @@ static struct br_tv_template_entry outputFacilityTemplateEntries[] = {
 #undef F
 #undef A
 
-br_output_facility* OutputFacilityVkInit(br_device* dev) {
+br_output_facility* OutputFacilityVkInit(br_device* dev, br_renderer_facility* rendfcty) {
     br_output_facility* self;
 
     self = BrResAllocate(dev, sizeof(br_output_facility), BR_MEMORY_OBJECT);
@@ -33,6 +34,7 @@ br_output_facility* OutputFacilityVkInit(br_device* dev) {
     self->dispatch = &outputFacilityDispatch;
     self->device = dev;
     self->object_list = BrObjectListAllocate(self);
+    self->renderer_facility = rendfcty;
 
     ObjectContainerAddFront(dev, (br_object*)self);
 

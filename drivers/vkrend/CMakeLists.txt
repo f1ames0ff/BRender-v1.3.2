@@ -18,6 +18,29 @@ set(VKREND_FILES
         outfcty.h
         devpixmp.c
         devpixmp.h
+        rendfcty.c
+        rendfcty.h
+        renderer.c
+        renderer.h
+        sstate.c
+        sstate.h
+        sbuffer.c
+        sbuffer.h
+        state.c
+        state.h
+        state_clip.c
+        state_cull.c
+        state_hidden.c
+        state_light.c
+        state_matrix.c
+        state_output.c
+        state_primitive.c
+        state_surface.c
+        gv1model.c
+        gv1model.h
+        gstored.c
+        gstored.h
+        onscreen.c
         vkshaders.h
         drv.h
         drv_ip.h

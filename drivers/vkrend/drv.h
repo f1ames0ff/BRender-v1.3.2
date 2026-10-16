@@ -10,10 +10,17 @@ extern "C" {
 #define BR_DEVICE_PRIVATE
 #define BR_OUTPUT_FACILITY_PRIVATE
 #define BR_DEVICE_PIXELMAP_PRIVATE
+#define BR_RENDERER_FACILITY_PRIVATE
+#define BR_RENDERER_PRIVATE
+#define BR_RENDERER_STATE_STORED_PRIVATE
+#define BR_BUFFER_STORED_PRIVATE
+#define BR_GEOMETRY_V1_MODEL_PRIVATE
+#define BR_GEOMETRY_STORED_PRIVATE
 
 #include "brddi.h"
 #include "fw_p.h"
 #include "brvkrend.h"
+#include "formats.h"
 #include "pm.h"
 
 #include "vkshaders.h"
@@ -22,6 +29,13 @@ extern "C" {
 #include "device.h"
 #include "outfcty.h"
 #include "devpixmp.h"
+#include "rendfcty.h"
+#include "state.h"
+#include "renderer.h"
+#include "sstate.h"
+#include "sbuffer.h"
+#include "gv1model.h"
+#include "gstored.h"
 
 #define BRT(t) BRT_##t, 0
 #define DEV(t) 0, #t

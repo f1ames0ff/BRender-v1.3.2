@@ -12,6 +12,13 @@ struct device_templates {
     struct br_tv_template* devicePixelmapFrontTemplate;
     struct br_tv_template* pixelmapNewTemplate;
     struct br_tv_template* pixelmapMatchTemplate;
+    struct br_tv_template* rendererFacilityTemplate;
+    struct br_tv_template* rendererNewTemplate;
+    struct br_tv_template* rendererTemplate;
+    struct br_tv_template* rendererStateStoredTemplate;
+    struct br_tv_template* bufferStoredTemplate;
+    struct br_tv_template* geometryV1ModelTemplate;
+    struct br_tv_template* geometryStoredTemplate;
 };
 
 #ifdef __cplusplus
