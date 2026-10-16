@@ -590,6 +590,11 @@ br_error BR_CMETHOD_DECL(br_primitive_state_soft, renderBegin)(
 	    nb = primInfoTables[i][j].nblocks;
     #endif
 
+	    if(nb == 0) {
+		    self->cache.last_block = NULL;
+		    return BRE_FAIL;
+	    }
+
 	    for(b=0; b < nb; b++,pb++) {
 
 		    /*
