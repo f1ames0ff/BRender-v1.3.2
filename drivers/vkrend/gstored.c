@@ -11,6 +11,68 @@ static struct br_tv_template_entry geometryStoredTemplateEntries[] = {
 };
 #undef F
 
+static VkrendDrawRecord drawRecords[VKREND_DRAW_RECORD_CAPACITY];
+static br_uint_32 drawRecordSequence;
+static br_uint_32 drawTriangleTotal;
+static br_boolean drawRecordsAnnounced;
+
+static br_uint_32 GeometryStoredVkRetainedRecords(void) {
+    if (drawRecordSequence < VKREND_DRAW_RECORD_CAPACITY)
+        return drawRecordSequence;
+
+    return VKREND_DRAW_RECORD_CAPACITY;
+}
+
+VkrendDrawRecord* GeometryStoredVkRecords(br_uint_32* count) {
+    if (count != NULL)
+        *count = GeometryStoredVkRetainedRecords();
+
+    return drawRecords;
+}
+
+VkrendDrawRecord* GeometryStoredVkRecordGet(br_uint_32 index) {
+    br_uint_32 retained = GeometryStoredVkRetainedRecords();
+
+    if (index >= retained)
+        return NULL;
+
+    return &drawRecords[(drawRecordSequence - retained + index) % VKREND_DRAW_RECORD_CAPACITY];
+}
+
+br_uint_32 GeometryStoredVkDrawCount(void) {
+    return drawRecordSequence;
+}
+
+br_uint_32 GeometryStoredVkTriangleCount(void) {
+    return drawTriangleTotal;
+}
+
+static void GeometryStoredVkCaptureDraw(br_geometry_stored* self, br_renderer* renderer) {
+    VkrendDrawRecord* record;
+    br_uint_32 sequence;
+
+    sequence = ++drawRecordSequence;
+    record = &drawRecords[(sequence - 1) % VKREND_DRAW_RECORD_CAPACITY];
+
+    record->sequence = sequence;
+    record->geometry = self;
+    record->model = self->model;
+    record->renderer = renderer;
+    record->state = renderer->state.current;
+    record->group_index = 0;
+    record->group_count = self->ngroups;
+    record->vertices = self->total_vertices;
+    record->faces = self->total_faces;
+    record->triangles = self->total_faces;
+
+    drawTriangleTotal += self->total_faces;
+
+    if (drawRecordsAnnounced == BR_FALSE) {
+        drawRecordsAnnounced = BR_TRUE;
+        BrLogPrintf("VKREND: draw records active\n");
+    }
+}
+
 br_geometry_stored* GeometryStoredVkAllocate(br_geometry_v1_model* gv1model, const char* id, br_renderer* r,
     struct v11model* model) {
     br_geometry_stored* self;
@@ -84,6 +146,8 @@ static struct br_tv_template* BR_CMETHOD_DECL(br_geometry_stored_vk, templateQue
 }
 
 static br_error RenderStored(br_geometry_stored* self, br_renderer* renderer) {
+    GeometryStoredVkCaptureDraw(self, renderer);
+
     renderer->scene_stats.face_group_count += self->ngroups;
     renderer->scene_stats.triangles_drawn_count += self->total_faces;
     renderer->scene_stats.triangles_rendered_count += self->total_faces;

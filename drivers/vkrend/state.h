@@ -112,6 +112,33 @@ typedef struct vk_state_hidden {
 } vk_state_hidden;
 
 enum {
+    VK_ENBL_CULL_BIT,
+    VK_ENBL_TRANSFORM_BIT,
+    VK_ENBL_SURFACE_BIT,
+    VK_ENBL_CLIPPING_BIT,
+    VK_ENBL_BOUNDS_BIT,
+    VK_ENBL_RENDER_BIT,
+};
+
+enum {
+    VK_ENBL_CULL = (1 << VK_ENBL_CULL_BIT),
+    VK_ENBL_TRANSFORM = (1 << VK_ENBL_TRANSFORM_BIT),
+    VK_ENBL_SURFACE = (1 << VK_ENBL_SURFACE_BIT),
+    VK_ENBL_CLIPPING = (1 << VK_ENBL_CLIPPING_BIT),
+    VK_ENBL_BOUNDS = (1 << VK_ENBL_BOUNDS_BIT),
+    VK_ENBL_RENDER = (1 << VK_ENBL_RENDER_BIT),
+};
+
+typedef struct vk_state_enable {
+    br_uint_32 flags;
+} vk_state_enable;
+
+typedef struct vk_state_bounds {
+    br_vector2 min;
+    br_vector2 max;
+} vk_state_bounds;
+
+enum {
     VK_PRIMF_DEPTH_WRITE_BIT,
     VK_PRIMF_COLOUR_WRITE_BIT,
 
@@ -182,6 +209,8 @@ typedef struct vk_state_stack {
     vk_state_output output;
     vk_state_light light[VK_MAX_STATE_LIGHTS];
     vk_state_hidden hidden;
+    vk_state_enable enable;
+    vk_state_bounds bounds;
 
     br_uint_32 valid;
 } vk_state_stack;
@@ -201,6 +230,8 @@ typedef struct vk_state_all {
         struct br_tv_template* output;
         struct br_tv_template* light[VK_MAX_STATE_LIGHTS];
         struct br_tv_template* hidden;
+        struct br_tv_template* enable;
+        struct br_tv_template* bounds;
     } templates;
 
     void* res;

@@ -1,5 +1,61 @@
 #include "drv.h"
 
+#define S BRTV_SET
+#define Q BRTV_QUERY
+#define A BRTV_ALL
+
+#define AX 0
+#define AF BRTV_ALL
+
+#define F(f) offsetof(vk_state_stack, f)
+
+static br_tv_template_entry enable_template_entries[] = {
+    { BRT(CULL_B), F(enable.flags), Q | S | A, BRTV_CONV_BIT, VK_ENBL_CULL,
+        VK_TM_PART | VK_TM_INVALID_PS | VK_TM_INVALID_PM },
+    { BRT(TRANSFORM_B), F(enable.flags), Q | S | A, BRTV_CONV_BIT, VK_ENBL_TRANSFORM,
+        VK_TM_PART | VK_TM_INVALID_PS | VK_TM_INVALID_PM },
+    { BRT(SURFACE_B), F(enable.flags), Q | S | A, BRTV_CONV_BIT, VK_ENBL_SURFACE,
+        VK_TM_PART | VK_TM_INVALID_PS | VK_TM_INVALID_PM },
+    { BRT(CLIPPING_B), F(enable.flags), Q | S | A, BRTV_CONV_BIT, VK_ENBL_CLIPPING,
+        VK_TM_PART | VK_TM_INVALID_PS | VK_TM_INVALID_PM },
+    { BRT(BOUNDS_B), F(enable.flags), Q | S | A, BRTV_CONV_BIT, VK_ENBL_BOUNDS,
+        VK_TM_PART | VK_TM_INVALID_PS | VK_TM_INVALID_PM },
+    { BRT(RENDER_B), F(enable.flags), Q | S | A, BRTV_CONV_BIT, VK_ENBL_RENDER,
+        VK_TM_PART | VK_TM_INVALID_PS | VK_TM_INVALID_PM },
+};
+
+static br_tv_template_entry bounds_template_entries[] = {
+    { BRT(MIN_V2_X), F(bounds.min), Q | S | AX, BRTV_CONV_V2_FIXED_SCALAR },
+    { BRT(MIN_V2_F), F(bounds.min), Q | S | AF, BRTV_CONV_V2_FLOAT_SCALAR },
+    { BRT(MAX_V2_X), F(bounds.max), Q | S | AX, BRTV_CONV_V2_FIXED_SCALAR },
+    { BRT(MAX_V2_F), F(bounds.max), Q | S | AF, BRTV_CONV_V2_FLOAT_SCALAR },
+};
+
+#undef F
+
+static const vk_state_enable enable_default_state = {
+    .flags = VK_ENBL_TRANSFORM | VK_ENBL_CLIPPING | VK_ENBL_RENDER,
+};
+
+static const vk_state_bounds bounds_default_state = {
+    .min = BR_VECTOR2(BR_SCALAR_MAX, BR_SCALAR_MAX),
+    .max = BR_VECTOR2(BR_SCALAR_MIN, BR_SCALAR_MIN),
+};
+
+static void StateVkInitEnable(vk_state_all* state) {
+    state->templates.enable = BrTVTemplateAllocate(state->res, enable_template_entries, BR_ASIZE(enable_template_entries));
+
+    state->default_.enable = enable_default_state;
+    state->default_.valid |= VK_MASK_STATE_ENABLE;
+}
+
+static void StateVkInitBounds(vk_state_all* state) {
+    state->templates.bounds = BrTVTemplateAllocate(state->res, bounds_template_entries, BR_ASIZE(bounds_template_entries));
+
+    state->default_.bounds = bounds_default_state;
+    state->default_.valid |= VK_MASK_STATE_BOUNDS;
+}
+
 void StateVkInit(vk_state_all* state, void* res) {
     BrMemSet(state, 0, sizeof(*state));
 
@@ -13,6 +69,8 @@ void StateVkInit(vk_state_all* state, void* res) {
     StateVkInitOutput(state);
     StateVkInitHidden(state);
     StateVkInitLight(state);
+    StateVkInitEnable(state);
+    StateVkInitBounds(state);
 
     state->current = state->stack;
     StateVkCopy(state->current, &state->default_, ~0u);
@@ -47,6 +105,12 @@ void StateVkCopy(vk_state_stack* dst, vk_state_stack* src, br_uint_32 mask) {
         for (int i = 0; i < VK_MAX_STATE_LIGHTS; ++i)
             dst->light[i] = src->light[i];
     }
+
+    if (mask & VK_MASK_STATE_ENABLE)
+        dst->enable = src->enable;
+
+    if (mask & VK_MASK_STATE_BOUNDS)
+        dst->bounds = src->bounds;
 }
 
 br_boolean StateVkPush(vk_state_all* state, br_uint_32 mask) {
@@ -108,6 +172,12 @@ struct br_tv_template* StateVkGetStateTemplate(vk_state_all* state, br_token par
 
     case BRT_HIDDEN_SURFACE:
         return state->templates.hidden;
+
+    case BRT_ENABLE:
+        return state->templates.enable;
+
+    case BRT_BOUNDS:
+        return state->templates.bounds;
 
     case BRT_LIGHT:
         if (index >= VK_MAX_STATE_LIGHTS)
