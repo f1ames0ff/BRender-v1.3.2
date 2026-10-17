@@ -6,6 +6,8 @@
 
 #include "vkshaders.h"
 
+#define VKREND_OVERLAY_SLOT_COUNT 16
+
 static PFN_vkGetInstanceProcAddr gpa;
 
 static br_uint_32 video_generation_counter;
@@ -1104,38 +1106,44 @@ static br_error video_create_pipeline(br_vk_video* video) {
 }
 
 static br_error video_create_descriptors(br_vk_video* video) {
-    VkDescriptorSetLayoutBinding binding;
+    VkDescriptorSetLayoutBinding bindings[2];
     VkDescriptorSetLayoutCreateInfo layout_info;
-    VkDescriptorPoolSize pool_size;
+    VkDescriptorPoolSize pool_sizes[2];
     VkDescriptorPoolCreateInfo pool_info;
     VkDescriptorSetAllocateInfo allocate_info;
     VkSamplerCreateInfo sampler_info;
     VkResult result;
 
-    BrMemSet(&binding, 0, sizeof(binding));
-    binding.binding = 0;
-    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    binding.descriptorCount = 1;
-    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    BrMemSet(bindings, 0, sizeof(bindings));
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
     BrMemSet(&layout_info, 0, sizeof(layout_info));
     layout_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layout_info.bindingCount = 1;
-    layout_info.pBindings = &binding;
+    layout_info.bindingCount = 2;
+    layout_info.pBindings = bindings;
 
     result = pCreateDescriptorSetLayout(video->device, &layout_info, NULL, &video->set_layout);
     if (result != VK_SUCCESS)
         return video_fail("vkCreateDescriptorSetLayout", result);
 
-    BrMemSet(&pool_size, 0, sizeof(pool_size));
-    pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    pool_size.descriptorCount = 1;
+    BrMemSet(pool_sizes, 0, sizeof(pool_sizes));
+    pool_sizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    pool_sizes[0].descriptorCount = 1;
+    pool_sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    pool_sizes[1].descriptorCount = 1;
 
     BrMemSet(&pool_info, 0, sizeof(pool_info));
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_info.maxSets = 1;
-    pool_info.poolSizeCount = 1;
-    pool_info.pPoolSizes = &pool_size;
+    pool_info.poolSizeCount = 2;
+    pool_info.pPoolSizes = pool_sizes;
 
     result = pCreateDescriptorPool(video->device, &pool_info, NULL, &video->descriptor_pool);
     if (result != VK_SUCCESS)
@@ -1169,23 +1177,43 @@ static br_error video_create_descriptors(br_vk_video* video) {
 }
 
 static br_error video_update_descriptors(br_vk_video* video) {
-    VkDescriptorImageInfo frame_info;
-    VkWriteDescriptorSet write;
+    VkDescriptorImageInfo overlay_info;
+    VkDescriptorImageInfo scene_info;
+    VkWriteDescriptorSet writes[2];
+    VkImageView scene_view;
 
-    BrMemSet(&frame_info, 0, sizeof(frame_info));
-    frame_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    frame_info.imageView = video->frame_view;
-    frame_info.sampler = video->sampler;
+    if (video->overlay_view == VK_NULL_HANDLE)
+        return BRE_OK;
 
-    BrMemSet(&write, 0, sizeof(write));
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = video->descriptor_set;
-    write.dstBinding = 0;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.pImageInfo = &frame_info;
+    scene_view = GpuVkPresentView(video, video->present_target);
+    if (scene_view == VK_NULL_HANDLE)
+        scene_view = video->black_view;
 
-    pUpdateDescriptorSets(video->device, 1, &write, 0, NULL);
+    BrMemSet(&overlay_info, 0, sizeof(overlay_info));
+    overlay_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    overlay_info.imageView = video->overlay_view;
+    overlay_info.sampler = video->sampler;
+
+    BrMemSet(&scene_info, 0, sizeof(scene_info));
+    scene_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    scene_info.imageView = scene_view;
+    scene_info.sampler = video->sampler;
+
+    BrMemSet(writes, 0, sizeof(writes));
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = video->descriptor_set;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[0].pImageInfo = &overlay_info;
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = video->descriptor_set;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[1].pImageInfo = &scene_info;
+
+    pUpdateDescriptorSets(video->device, 2, writes, 0, NULL);
 
     return BRE_OK;
 }
@@ -1193,6 +1221,7 @@ static br_error video_update_descriptors(br_vk_video* video) {
 static br_error video_create_sync_objects(br_vk_video* video) {
     VkCommandPoolCreateInfo pool_info;
     VkCommandBufferAllocateInfo allocate_info;
+    VkCommandBuffer buffers[2];
     VkFenceCreateInfo fence_info;
     VkSemaphoreCreateInfo semaphore_info;
     VkResult result;
@@ -1210,11 +1239,14 @@ static br_error video_create_sync_objects(br_vk_video* video) {
     allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocate_info.commandPool = video->command_pool;
     allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocate_info.commandBufferCount = 1;
+    allocate_info.commandBufferCount = 2;
 
-    result = pAllocateCommandBuffers(video->device, &allocate_info, &video->command_buffer);
+    result = pAllocateCommandBuffers(video->device, &allocate_info, buffers);
     if (result != VK_SUCCESS)
         return video_fail("vkAllocateCommandBuffers", result);
+
+    video->command_buffer = buffers[0];
+    video->scene_command_buffer = buffers[1];
 
     BrMemSet(&fence_info, 0, sizeof(fence_info));
     fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -1223,6 +1255,13 @@ static br_error video_create_sync_objects(br_vk_video* video) {
     result = pCreateFence(video->device, &fence_info, NULL, &video->fence);
     if (result != VK_SUCCESS)
         return video_fail("vkCreateFence", result);
+
+    BrMemSet(&fence_info, 0, sizeof(fence_info));
+    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+
+    result = pCreateFence(video->device, &fence_info, NULL, &video->scene_fence);
+    if (result != VK_SUCCESS)
+        return video_fail("vkCreateFence(scene)", result);
 
     BrMemSet(&semaphore_info, 0, sizeof(semaphore_info));
     semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -1234,36 +1273,250 @@ static br_error video_create_sync_objects(br_vk_video* video) {
     return BRE_OK;
 }
 
-static br_error video_ensure_frame(br_vk_video* video, br_uint_32 width, br_uint_32 height) {
-    VkDeviceSize size = (VkDeviceSize)width * 2 * height;
+br_boolean VIDEOVkOverlayEnsure(br_vk_video* video, br_uint_32 width, br_uint_32 height) {
+    VkDeviceSize slot_size = (((VkDeviceSize)width * 2 * height) + 3) & ~(VkDeviceSize)3;
+    VkDeviceSize size = slot_size * VKREND_OVERLAY_SLOT_COUNT;
 
-    if (video->frame_image != VK_NULL_HANDLE && video->frame_width == width && video->frame_height == height)
-        return BRE_OK;
+    if (video->overlay_image != VK_NULL_HANDLE && video->overlay_width == width && video->overlay_height == height)
+        return BR_TRUE;
     if (width == 0 || height == 0)
-        return BRE_FAIL;
+        return BR_FALSE;
+
+    if (video->scene_recording)
+        GpuVkFrameEnd(video);
 
     pDeviceWaitIdle(video->device);
 
-    video_destroy_image(video, &video->frame_image, &video->frame_memory, &video->frame_view);
+    video_destroy_image(video, &video->overlay_image, &video->overlay_memory, &video->overlay_view);
     video_destroy_buffer(video, &video->pixel_buffer, &video->pixel_memory);
     video->pixel_mapped = NULL;
     video->pixel_buffer_size = 0;
-    video->frame_initialised = BR_FALSE;
+    video->pixel_slot_size = 0;
+    video->pixel_slot = 0;
+    video->overlay_initialised = BR_FALSE;
 
     if (video_create_image(video, width, height, VK_FORMAT_R5G6B5_UNORM_PACK16,
-            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &video->frame_image, &video->frame_memory,
-            &video->frame_view, &video->frame_initialised) != BRE_OK)
-        return BRE_FAIL;
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &video->overlay_image,
+            &video->overlay_memory, &video->overlay_view, NULL) != BRE_OK)
+        return BR_FALSE;
 
     if (video_create_buffer(video, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &video->pixel_buffer, &video->pixel_memory,
             &video->pixel_mapped) != BRE_OK)
+        return BR_FALSE;
+
+    video->overlay_width = width;
+    video->overlay_height = height;
+    video->pixel_buffer_size = size;
+    video->pixel_slot_size = slot_size;
+    video->overlay_generation++;
+
+    return BR_TRUE;
+}
+
+void VIDEOVkOverlayUpload(br_vk_video* video, VkCommandBuffer command_buffer, const br_uint_8* pixels,
+    br_uint_32 width, br_uint_32 height, br_int_32 row_bytes, br_size_t base) {
+    VkBufferMemoryBarrier buffer_barrier;
+    VkImageMemoryBarrier image_barrier;
+    VkBufferImageCopy region;
+    br_uint_32 slot;
+    VkDeviceSize slot_offset;
+    br_uint_8* destination;
+    br_uint_32 row;
+
+    if (video->overlay_image == VK_NULL_HANDLE || video->pixel_mapped == NULL || pixels == NULL)
+        return;
+    if (width == 0 || height == 0 || width > video->overlay_width || height > video->overlay_height)
+        return;
+
+    slot = video->pixel_slot;
+    if (slot >= VKREND_OVERLAY_SLOT_COUNT)
+        slot = VKREND_OVERLAY_SLOT_COUNT - 1;
+    else
+        video->pixel_slot++;
+
+    slot_offset = (VkDeviceSize)slot * video->pixel_slot_size;
+    destination = (br_uint_8*)video->pixel_mapped + slot_offset;
+
+    for (row = 0; row < height; row++) {
+        BrMemCpy(destination + (br_size_t)row * (br_size_t)width * 2,
+            pixels + base + (br_size_t)row * (br_size_t)row_bytes, (br_size_t)width * 2);
+    }
+
+    BrMemSet(&buffer_barrier, 0, sizeof(buffer_barrier));
+    buffer_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    buffer_barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+    buffer_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    buffer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    buffer_barrier.buffer = video->pixel_buffer;
+    buffer_barrier.offset = slot_offset;
+    buffer_barrier.size = video->pixel_slot_size;
+
+    pCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
+        &buffer_barrier, 0, NULL);
+
+    BrMemSet(&image_barrier, 0, sizeof(image_barrier));
+    image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    image_barrier.oldLayout =
+        video->overlay_initialised ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+    image_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    image_barrier.srcAccessMask = video->overlay_initialised ? VK_ACCESS_SHADER_READ_BIT : 0;
+    image_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    image_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    image_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    image_barrier.image = video->overlay_image;
+    image_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    image_barrier.subresourceRange.levelCount = 1;
+    image_barrier.subresourceRange.layerCount = 1;
+
+    pCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &image_barrier);
+
+    BrMemSet(&region, 0, sizeof(region));
+    region.bufferOffset = slot_offset;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent.width = width;
+    region.imageExtent.height = height;
+    region.imageExtent.depth = 1;
+
+    pCmdCopyBufferToImage(command_buffer, video->pixel_buffer, video->overlay_image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    BrMemSet(&image_barrier, 0, sizeof(image_barrier));
+    image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    image_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    image_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    image_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    image_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    image_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    image_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    image_barrier.image = video->overlay_image;
+    image_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    image_barrier.subresourceRange.levelCount = 1;
+    image_barrier.subresourceRange.layerCount = 1;
+
+    pCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+        0, NULL, 0, NULL, 1, &image_barrier);
+
+    video->overlay_initialised = BR_TRUE;
+}
+
+static br_error video_create_black_texture(br_vk_video* video) {
+    VkBuffer staging_buffer;
+    VkDeviceMemory staging_memory;
+    void* mapped;
+    VkCommandBufferBeginInfo begin_info;
+    VkBufferMemoryBarrier buffer_barrier;
+    VkImageMemoryBarrier image_barrier;
+    VkBufferImageCopy region;
+    VkSubmitInfo submit_info;
+    VkResult result;
+
+    staging_buffer = VK_NULL_HANDLE;
+    staging_memory = VK_NULL_HANDLE;
+    mapped = NULL;
+
+    if (video_create_image(video, 1, 1, VK_FORMAT_R8G8B8A8_UNORM,
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, &video->black_image,
+            &video->black_memory, &video->black_view, NULL) != BRE_OK)
         return BRE_FAIL;
 
-    video->frame_width = width;
-    video->frame_height = height;
-    video->pixel_buffer_size = size;
+    if (video_create_buffer(video, 4, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &staging_buffer, &staging_memory, &mapped)
+        != BRE_OK)
+        return BRE_FAIL;
 
-    return video_update_descriptors(video);
+    ((br_uint_8*)mapped)[0] = 0;
+    ((br_uint_8*)mapped)[1] = 0;
+    ((br_uint_8*)mapped)[2] = 0;
+    ((br_uint_8*)mapped)[3] = 255;
+    pUnmapMemory(video->device, staging_memory);
+
+    BrMemSet(&begin_info, 0, sizeof(begin_info));
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+    result = pBeginCommandBuffer(video->command_buffer, &begin_info);
+    if (result != VK_SUCCESS)
+        return video_fail("vkBeginCommandBuffer(black)", result);
+
+    BrMemSet(&buffer_barrier, 0, sizeof(buffer_barrier));
+    buffer_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    buffer_barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+    buffer_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    buffer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    buffer_barrier.buffer = staging_buffer;
+    buffer_barrier.offset = 0;
+    buffer_barrier.size = VK_WHOLE_SIZE;
+
+    pCmdPipelineBarrier(video->command_buffer, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+        NULL, 1, &buffer_barrier, 0, NULL);
+
+    BrMemSet(&image_barrier, 0, sizeof(image_barrier));
+    image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    image_barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    image_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    image_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    image_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    image_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    image_barrier.image = video->black_image;
+    image_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    image_barrier.subresourceRange.levelCount = 1;
+    image_barrier.subresourceRange.layerCount = 1;
+
+    pCmdPipelineBarrier(video->command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+        0, NULL, 0, NULL, 1, &image_barrier);
+
+    BrMemSet(&region, 0, sizeof(region));
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent.width = 1;
+    region.imageExtent.height = 1;
+    region.imageExtent.depth = 1;
+
+    pCmdCopyBufferToImage(video->command_buffer, staging_buffer, video->black_image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    BrMemSet(&image_barrier, 0, sizeof(image_barrier));
+    image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    image_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    image_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    image_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    image_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    image_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    image_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    image_barrier.image = video->black_image;
+    image_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    image_barrier.subresourceRange.levelCount = 1;
+    image_barrier.subresourceRange.layerCount = 1;
+
+    pCmdPipelineBarrier(video->command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &image_barrier);
+
+    result = pEndCommandBuffer(video->command_buffer);
+    if (result != VK_SUCCESS)
+        return video_fail("vkEndCommandBuffer(black)", result);
+
+    pResetFences(video->device, 1, &video->fence);
+
+    BrMemSet(&submit_info, 0, sizeof(submit_info));
+    submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit_info.commandBufferCount = 1;
+    submit_info.pCommandBuffers = &video->command_buffer;
+
+    result = pQueueSubmit(video->queue, 1, &submit_info, video->fence);
+    if (result != VK_SUCCESS)
+        return video_fail("vkQueueSubmit(black)", result);
+
+    result = pWaitForFences(video->device, 1, &video->fence, VK_TRUE, UINT64_MAX);
+    if (result != VK_SUCCESS)
+        return video_fail("vkWaitForFences(black)", result);
+
+    video_destroy_buffer(video, &staging_buffer, &staging_memory);
+    video->black_initialised = BR_TRUE;
+
+    return BRE_OK;
 }
 
 static br_error video_recover_device_lost(br_vk_video* video) {
@@ -1272,21 +1525,28 @@ static br_error video_recover_device_lost(br_vk_video* video) {
     br_int_32 height = video->window_height;
     br_int_32 attempts = video->recovery_attempted;
 
-    if (attempts > 0) {
-        BrFailure("VKREND: Vulkan device lost again after recovery");
-        video->active = BR_FALSE;
+    if (attempts >= 8) {
+        BrLogPrintf("VKREND: device lost recovery budget exhausted\n");
         return BRE_FAIL;
     }
 
     BrLogPrintf("VKREND: Vulkan device lost, reinitialising\n");
 
+    GpuVkResetDeferred();
+
     VIDEOVkDestroy(video);
 
     if (VIDEOVkCreate(video, &callbacks, width, height) != BRE_OK) {
-        BrFailure("VKREND: reinitialisation after device loss failed");
+        BrLogPrintf("VKREND: reinitialisation after device loss failed\n");
         return BRE_FAIL;
     }
 
+    GpuVkResetAfterRecovery();
+    BufferStoredVkResetAfterRecovery();
+
+    video->present_target = NULL;
+    video->frame_has_scene = BR_FALSE;
+    video->recovery_stable_frames = 0;
     video->recovery_attempted = attempts + 1;
     return BRE_OK;
 }
@@ -1296,8 +1556,6 @@ static br_error video_present_frame(br_vk_video* video, const void* pixels, br_i
     VkResult result;
     br_uint_32 image_index = 0;
     VkCommandBufferBeginInfo begin_info;
-    VkImageMemoryBarrier barrier;
-    VkBufferMemoryBarrier buffer_barrier;
     VkRenderPassBeginInfo render_pass_info;
     VkClearValue clear_value;
     VkViewport viewport;
@@ -1305,15 +1563,14 @@ static br_error video_present_frame(br_vk_video* video, const void* pixels, br_i
     VkSubmitInfo submit_info;
     VkPresentInfoKHR present_info;
     VkPipelineStageFlags wait_stage;
-    br_uint_32 row;
 
     if (video->window_width <= 0 || video->window_height <= 0)
         return BRE_OK;
 
-    if (video_ensure_frame(video, (br_uint_32)width, (br_uint_32)height) != BRE_OK)
+    if (!VIDEOVkOverlayEnsure(video, (br_uint_32)width, (br_uint_32)height))
         return BRE_FAIL;
 
-    if (video->frame_image == VK_NULL_HANDLE)
+    if (video->overlay_image == VK_NULL_HANDLE)
         return BRE_OK;
 
     result = pWaitForFences(video->device, 1, &video->fence, VK_TRUE, UINT64_MAX);
@@ -1324,13 +1581,13 @@ static br_error video_present_frame(br_vk_video* video, const void* pixels, br_i
     if (result != VK_SUCCESS)
         return video_fail("vkWaitForFences", result);
 
-    for (row = 0; row < (br_uint_32)height; row++) {
-        BrMemCpy((br_uint_8*)video->pixel_mapped + (size_t)row * (br_size_t)width * 2,
-            (const br_uint_8*)pixels + (size_t)row * row_bytes, (br_size_t)width * 2);
-    }
+    if (video_update_descriptors(video) != BRE_OK)
+        return BRE_FAIL;
 
-    result = pAcquireNextImageKHR(video->device, video->swapchain, UINT64_MAX, video->acquire_semaphore, VK_NULL_HANDLE,
-        &image_index);
+    video->pixel_slot = 0;
+
+    result = pAcquireNextImageKHR(video->device, video->swapchain, UINT64_MAX, video->acquire_semaphore,
+        VK_NULL_HANDLE, &image_index);
     if (result == VK_ERROR_OUT_OF_DATE_KHR) {
         if (video_recreate_swapchain(video) != BRE_OK)
             video->active = BR_FALSE;
@@ -1354,65 +1611,10 @@ static br_error video_present_frame(br_vk_video* video, const void* pixels, br_i
     if (result != VK_SUCCESS)
         return video_fail("vkBeginCommandBuffer", result);
 
-    BrMemSet(&buffer_barrier, 0, sizeof(buffer_barrier));
-    buffer_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    buffer_barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-    buffer_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    buffer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    buffer_barrier.buffer = video->pixel_buffer;
-    buffer_barrier.offset = 0;
-    buffer_barrier.size = VK_WHOLE_SIZE;
+    VIDEOVkOverlayUpload(video, video->command_buffer, (const br_uint_8*)pixels, (br_uint_32)width,
+        (br_uint_32)height, row_bytes, 0);
 
-    pCmdPipelineBarrier(video->command_buffer, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
-        &buffer_barrier, 0, NULL);
-
-    BrMemSet(&barrier, 0, sizeof(barrier));
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.oldLayout = video->frame_initialised ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
-    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.srcAccessMask = video->frame_initialised ? VK_ACCESS_SHADER_READ_BIT : 0;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = video->frame_image;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.layerCount = 1;
-
-    pCmdPipelineBarrier(video->command_buffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
-
-    {
-        VkBufferImageCopy region;
-
-        BrMemSet(&region, 0, sizeof(region));
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.layerCount = 1;
-        region.imageExtent.width = video->frame_width;
-        region.imageExtent.height = video->frame_height;
-        region.imageExtent.depth = 1;
-
-        pCmdCopyBufferToImage(video->command_buffer, video->pixel_buffer, video->frame_image,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-    }
-    video->frame_initialised = BR_TRUE;
-
-    BrMemSet(&barrier, 0, sizeof(barrier));
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = video->frame_image;
-    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.layerCount = 1;
-
-    pCmdPipelineBarrier(video->command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-        0, NULL, 0, NULL, 1, &barrier);
+    GpuVkPresentPrepare(video, video->present_target, video->command_buffer);
 
     BrMemSet(&clear_value, 0, sizeof(clear_value));
     clear_value.color.float32[3] = 1.0f;
@@ -1522,24 +1724,56 @@ static br_error video_present_frame(br_vk_video* video, const void* pixels, br_i
         return video_fail("vkQueuePresentKHR", result);
     }
 
+    video->present_target = NULL;
+    video->frame_has_scene = BR_FALSE;
+
+    if (video->recovery_attempted > 0) {
+        if (++video->recovery_stable_frames >= 600) {
+            video->recovery_attempted = 0;
+            video->recovery_stable_frames = 0;
+        }
+    } else {
+        video->recovery_stable_frames = 0;
+    }
+
     return BRE_OK;
 }
 
 static void video_destroy_all(br_vk_video* video) {
+    GpuVkResetDeferred();
+
     if (video->device != VK_NULL_HANDLE)
         pDeviceWaitIdle(video->device);
 
     if (video->device != VK_NULL_HANDLE) {
         video_destroy_swapchain(video);
-        video_destroy_image(video, &video->frame_image, &video->frame_memory, &video->frame_view);
+        video_destroy_image(video, &video->overlay_image, &video->overlay_memory, &video->overlay_view);
+        video_destroy_image(video, &video->black_image, &video->black_memory, &video->black_view);
         video_destroy_buffer(video, &video->pixel_buffer, &video->pixel_memory);
         video->pixel_mapped = NULL;
         video->pixel_buffer_size = 0;
+        video->pixel_slot_size = 0;
+        video->pixel_slot = 0;
+        video->overlay_width = 0;
+        video->overlay_height = 0;
+        video->overlay_generation = 0;
+        video->overlay_initialised = BR_FALSE;
+        video->black_initialised = BR_FALSE;
+        video->present_target = NULL;
+        video->frame_has_scene = BR_FALSE;
 
         if (video->fence != VK_NULL_HANDLE) {
             pDestroyFence(video->device, video->fence, NULL);
             video->fence = VK_NULL_HANDLE;
         }
+        if (video->scene_fence != VK_NULL_HANDLE) {
+            pDestroyFence(video->device, video->scene_fence, NULL);
+            video->scene_fence = VK_NULL_HANDLE;
+        }
+        video->scene_command_buffer = VK_NULL_HANDLE;
+        video->scene_recording = BR_FALSE;
+        video->scene_fence_pending = BR_FALSE;
+        video->frame_epoch = 0;
         if (video->acquire_semaphore != VK_NULL_HANDLE) {
             pDestroySemaphore(video->device, video->acquire_semaphore, NULL);
             video->acquire_semaphore = VK_NULL_HANDLE;
@@ -1626,7 +1860,8 @@ br_error VIDEOVkCreate(br_vk_video* video, const br_device_vkrend_callback_procs
         || video_check_frame_format(video) != BRE_OK || video_create_device(video) != BRE_OK
         || video_choose_surface_format(video) != BRE_OK || video_create_render_pass(video) != BRE_OK
         || video_create_descriptors(video) != BRE_OK || video_create_pipeline(video) != BRE_OK
-        || video_create_sync_objects(video) != BRE_OK || video_create_swapchain(video, VK_NULL_HANDLE) != BRE_OK) {
+        || video_create_sync_objects(video) != BRE_OK || video_create_black_texture(video) != BRE_OK
+        || video_create_swapchain(video, VK_NULL_HANDLE) != BRE_OK) {
         video_destroy_all(video);
         BrMemSet(video, 0, sizeof(*video));
         return BRE_FAIL;

@@ -12,8 +12,20 @@ void GpuVkSceneBeginRenderer(struct br_renderer* renderer);
 
 void GpuVkSceneEndRenderer(struct br_renderer* renderer);
 
+void GpuVkFrameEnd(br_vk_video* video);
+
+VkImageView GpuVkPresentView(br_vk_video* video, struct vk_gpu_target* target);
+
+void GpuVkPresentPrepare(br_vk_video* video, struct vk_gpu_target* target, VkCommandBuffer command_buffer);
+
+void GpuVkShadowResetKey(struct br_device_pixelmap* pixelmap);
+
 void GpuVkRenderStored(struct br_geometry_stored* geometry, struct br_renderer* renderer,
     struct br_renderer_state_stored* default_state);
+void GpuVkDeferBuffer(VkDevice device, VkBuffer buffer, VkDeviceMemory memory);
+void GpuVkDeferImage(VkDevice device, VkImage image, VkDeviceMemory memory, VkImageView view);
+void GpuVkResetDeferred(void);
+void GpuVkResetAfterRecovery(void);
 
 br_boolean GpuVkRenderV1Model(struct v11model* model, struct br_renderer* renderer,
     struct br_renderer_state_stored* default_state);

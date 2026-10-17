@@ -69,6 +69,22 @@ static void BufferTextureLogOnce(br_boolean* flag, const char* message) {
     BrLogPrintf("VKREND: %s\n", (char*)message);
 }
 
+void BufferStoredVkResetAfterRecovery(void) {
+    sbuffer_loaded = BR_FALSE;
+    sbuffer_instance = VK_NULL_HANDLE;
+    sbuffer_format_supported = -1;
+    sbuffer_logged_source = BR_FALSE;
+    sbuffer_logged_type = BR_FALSE;
+    sbuffer_logged_palette = BR_FALSE;
+    sbuffer_logged_palette_type = BR_FALSE;
+    sbuffer_logged_clut_palette = BR_FALSE;
+    sbuffer_logged_dimensions = BR_FALSE;
+    sbuffer_logged_format = BR_FALSE;
+    sbuffer_logged_allocation = BR_FALSE;
+    sbuffer_logged_upload = BR_FALSE;
+    sbuffer_logged_device = BR_FALSE;
+}
+
 static br_boolean BufferTextureLoadFunctions(VkInstance instance) {
     PFN_vkGetInstanceProcAddr gpa;
 
@@ -667,9 +683,10 @@ static void BufferTextureRelease(struct br_buffer_stored* self) {
             self->staging_mapped = NULL;
         }
 
-        BufferTextureDestroyBuffer(self->texture_device, &self->staging_buffer, &self->staging_memory);
-        BufferTextureDestroyImage(self->texture_device, &self->texture.image, &self->texture_memory,
-            &self->texture.view);
+        GpuVkDeferBuffer(self->texture_device, self->staging_buffer, self->staging_memory);
+        self->staging_buffer = VK_NULL_HANDLE;
+        self->staging_memory = VK_NULL_HANDLE;
+        GpuVkDeferImage(self->texture_device, self->texture.image, self->texture_memory, self->texture.view);
     }
 
     BufferTextureAbandon(self);
@@ -738,8 +755,12 @@ static br_boolean BufferTextureBuild(struct br_buffer_stored* self, br_vk_video*
         BufferTextureDestroyImage(video->device, &image, &image_memory, &view);
 
         if (reuse) {
-            BufferTextureDestroyImage(self->texture_device, &self->texture.image, &self->texture_memory,
-                &self->texture.view);
+            GpuVkDeferImage(self->texture_device, self->texture.image, self->texture_memory, self->texture.view);
+            self->texture.image = VK_NULL_HANDLE;
+            self->texture.view = VK_NULL_HANDLE;
+            self->texture_memory = VK_NULL_HANDLE;
+            self->texture.width = 0;
+            self->texture.height = 0;
         }
 
         return BR_FALSE;
@@ -747,8 +768,7 @@ static br_boolean BufferTextureBuild(struct br_buffer_stored* self, br_vk_video*
 
     if (!reuse) {
         if (self->texture.image != VK_NULL_HANDLE) {
-            BufferTextureDestroyImage(self->texture_device, &self->texture.image, &self->texture_memory,
-                &self->texture.view);
+            GpuVkDeferImage(self->texture_device, self->texture.image, self->texture_memory, self->texture.view);
         }
 
         self->texture.image = image;
@@ -799,6 +819,11 @@ br_boolean BufferStoredVkGetTexture(struct br_buffer_stored* stored, br_vk_video
 
     palette = BufferTexturePalette(source);
     clut = BufferTextureSourceClut(stored, source);
+
+    if (stored->texture_device != VK_NULL_HANDLE && stored->texture_device != video->device) {
+        BufferTextureAbandon(stored);
+        stored->unavailable = BR_FALSE;
+    }
 
     if (!stored->unavailable
         && (stored->texture.image == VK_NULL_HANDLE || stored->built_revision != stored->revision

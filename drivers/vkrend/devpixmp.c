@@ -32,10 +32,19 @@ static br_int_32 DevicePixelmapVkDepthRowBytes(br_device_pixelmap* self) {
 
 static br_error DevicePixelmapVkAllocateShadow(br_device_pixelmap* self, br_size_t size) {
     void* shadow;
+    br_uint_16* words;
+    br_size_t count;
 
     shadow = BrResAllocate(self, size, BR_MEMORY_PIXELS);
     if (shadow == NULL)
         return BRE_NO_MEMORY;
+
+    words = (br_uint_16*)shadow;
+    if (self->pm_type == BR_PMT_RGB_565) {
+        count = size / sizeof(br_uint_16);
+        while (count-- > 0)
+            *words++ = 0xF81F;
+    }
 
     if (self->shadow != NULL)
         BrResFree(self->shadow);
@@ -411,6 +420,7 @@ static br_error BR_CMETHOD_DECL(br_device_pixelmap_vk, allocateSub)(br_device_pi
 
 static br_error BR_CMETHOD_DECL(br_device_pixelmap_vkf, doubleBuffer)(br_device_pixelmap* self, br_device_pixelmap* src) {
     br_device_pixelmap* screen = self->screen;
+    br_error result;
 
     if (src == NULL || self == src)
         return BRE_OK;
@@ -424,7 +434,13 @@ static br_error BR_CMETHOD_DECL(br_device_pixelmap_vkf, doubleBuffer)(br_device_
     if (src->pm_type != BR_PMT_RGB_565 || src->pm_pixels == NULL || src->pm_width <= 0 || src->pm_height <= 0)
         return BRE_UNSUPPORTED;
 
-    return VIDEOVkPresent(&screen->video, src->pm_pixels, src->pm_width, src->pm_height, src->pm_row_bytes);
+    GpuVkFrameEnd(&screen->video);
+
+    result = VIDEOVkPresent(&screen->video, src->pm_pixels, src->pm_width, src->pm_height, src->pm_row_bytes);
+    if (result == BRE_OK)
+        GpuVkShadowResetKey(src);
+
+    return result;
 }
 
 static br_error BR_CMETHOD_DECL(br_device_pixelmap_vk, flush)(br_device_pixelmap* self) {

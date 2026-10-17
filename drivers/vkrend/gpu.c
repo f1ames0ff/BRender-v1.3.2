@@ -66,10 +66,11 @@ typedef struct vk_gpu_functions {
     PFN_vkCmdBindDescriptorSets CmdBindDescriptorSets;
     PFN_vkCmdSetViewport CmdSetViewport;
     PFN_vkCmdSetScissor CmdSetScissor;
-    PFN_vkCmdCopyImageToBuffer CmdCopyImageToBuffer;
+    PFN_vkCmdClearColorImage CmdClearColorImage;
     PFN_vkCmdCopyBufferToImage CmdCopyBufferToImage;
     PFN_vkCmdBindVertexBuffers CmdBindVertexBuffers;
     PFN_vkCmdBindIndexBuffer CmdBindIndexBuffer;
+    PFN_vkCmdDraw CmdDraw;
     PFN_vkCmdDrawIndexed CmdDrawIndexed;
     PFN_vkBeginCommandBuffer BeginCommandBuffer;
     PFN_vkEndCommandBuffer EndCommandBuffer;
@@ -163,6 +164,18 @@ struct vk_gpu_target {
     VkDeviceMemory white_staging_memory;
     br_boolean white_ready;
 
+    VkPipeline overlay_pipeline;
+    VkPipelineLayout overlay_pipeline_layout;
+    VkDescriptorSetLayout overlay_set_layout;
+    VkDescriptorPool overlay_descriptor_pool;
+    VkDescriptorSet overlay_descriptor_set;
+    VkSampler overlay_sampler;
+    br_uint_32 overlay_generation;
+
+    VkImageLayout colour_layout;
+    br_uint_32 frame_epoch;
+    br_uint_32 overlay_epoch;
+
     vk_gpu_texture_set texture_sets[VKREND_GPU_TEXTURE_SET_CAPACITY];
     br_uint_32 texture_set_count;
     VkDescriptorSet texture_set_pool[VKREND_GPU_TEXTURE_SET_CAPACITY];
@@ -178,17 +191,6 @@ struct vk_gpu_target {
     VkDeviceSize ubo_stride;
     br_uint_32 ubo_slot;
 
-    VkBuffer staging_buffer;
-    VkDeviceMemory staging_memory;
-    br_uint_8* staging_mapped;
-
-    VkBuffer readback_buffer;
-    VkDeviceMemory readback_memory;
-    br_uint_8* readback_mapped;
-
-    VkFence fence;
-
-    br_boolean initialised;
     br_boolean in_scene;
 };
 
@@ -201,6 +203,7 @@ static br_boolean gpu_draw_logged;
 static br_boolean gpu_texture_failure_logged;
 static br_boolean gpu_texture_capacity_logged;
 static br_boolean gpu_retired_full_logged;
+static br_boolean gpu_frame_logged;
 
 static void GpuVkLogMarker(const char* format, const char* text);
 
@@ -280,10 +283,11 @@ static br_boolean GpuVkLoadFunctions(VkInstance instance) {
     VKREND_LOAD(CmdBindDescriptorSets);
     VKREND_LOAD(CmdSetViewport);
     VKREND_LOAD(CmdSetScissor);
-    VKREND_LOAD(CmdCopyImageToBuffer);
+    VKREND_LOAD(CmdClearColorImage);
     VKREND_LOAD(CmdCopyBufferToImage);
     VKREND_LOAD(CmdBindVertexBuffers);
     VKREND_LOAD(CmdBindIndexBuffer);
+    VKREND_LOAD(CmdDraw);
     VKREND_LOAD(CmdDrawIndexed);
     VKREND_LOAD(BeginCommandBuffer);
     VKREND_LOAD(EndCommandBuffer);
@@ -365,6 +369,10 @@ static br_boolean GpuVkCreateBuffer(br_vk_video* video, VkDeviceSize size, VkBuf
 
     gpu.GetBufferMemoryRequirements(video->device, *buffer, &requirements);
     if (!GpuVkFindMemoryType(video, requirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
+                | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            &memory_type)
+        && !GpuVkFindMemoryType(video, requirements.memoryTypeBits,
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
                 | VK_MEMORY_PROPERTY_HOST_CACHED_BIT,
             &memory_type)
@@ -521,7 +529,7 @@ static br_boolean GpuVkCreateRenderPass(vk_gpu_target* target) {
     attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     attachments[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    attachments[0].finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    attachments[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     attachments[1].format = VK_FORMAT_D16_UNORM;
     attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
@@ -550,8 +558,10 @@ static br_boolean GpuVkCreateRenderPass(vk_gpu_target* target) {
     dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
     dependency.dstSubpass = 0;
     dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
+        | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
     BrMemSet(&render_pass_info, 0, sizeof(render_pass_info));
     render_pass_info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
@@ -835,6 +845,240 @@ static br_boolean GpuVkCreatePipeline(vk_gpu_target* target) {
     return BR_TRUE;
 }
 
+static void GpuVkWriteOverlayDescriptor(vk_gpu_target* target, VkImageView view) {
+    VkDescriptorImageInfo image_info;
+    VkWriteDescriptorSet write;
+
+    if (target->overlay_descriptor_set == VK_NULL_HANDLE || view == VK_NULL_HANDLE)
+        return;
+
+    BrMemSet(&image_info, 0, sizeof(image_info));
+    image_info.sampler = target->overlay_sampler;
+    image_info.imageView = view;
+    image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    BrMemSet(&write, 0, sizeof(write));
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = target->overlay_descriptor_set;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &image_info;
+
+    gpu.UpdateDescriptorSets(target->video->device, 1, &write, 0, NULL);
+
+    target->overlay_generation = target->video->overlay_generation;
+}
+
+static br_boolean GpuVkCreateOverlayPipeline(vk_gpu_target* target) {
+    VkDevice device = target->video->device;
+    VkShaderModule vertex_module;
+    VkShaderModule fragment_module;
+    VkPipelineShaderStageCreateInfo stages[2];
+    VkPipelineVertexInputStateCreateInfo vertex_input;
+    VkPipelineInputAssemblyStateCreateInfo input_assembly;
+    VkPipelineViewportStateCreateInfo viewport_state;
+    VkPipelineRasterizationStateCreateInfo rasterization;
+    VkPipelineMultisampleStateCreateInfo multisample;
+    VkPipelineDepthStencilStateCreateInfo depth_stencil;
+    VkPipelineColorBlendAttachmentState blend_attachment;
+    VkPipelineColorBlendStateCreateInfo blend;
+    VkDynamicState dynamic_states[2];
+    VkPipelineDynamicStateCreateInfo dynamic;
+    VkDescriptorSetLayoutBinding binding;
+    VkDescriptorSetLayoutCreateInfo set_info;
+    VkDescriptorPoolSize pool_size;
+    VkDescriptorPoolCreateInfo pool_info;
+    VkDescriptorSetAllocateInfo allocate_info;
+    VkPipelineLayoutCreateInfo layout_info;
+    VkGraphicsPipelineCreateInfo pipeline_info;
+    VkSamplerCreateInfo sampler_info;
+    VkResult result;
+
+    vertex_module = VK_NULL_HANDLE;
+    fragment_module = VK_NULL_HANDLE;
+
+    if (!GpuVkCreateShaderModule(device, VKREND_PRESENT_VERT_SPV, sizeof(VKREND_PRESENT_VERT_SPV), &vertex_module))
+        return BR_FALSE;
+    if (!GpuVkCreateShaderModule(device, VKREND_OVERLAY_FRAG_SPV, sizeof(VKREND_OVERLAY_FRAG_SPV), &fragment_module)) {
+        gpu.DestroyShaderModule(device, vertex_module, NULL);
+        return BR_FALSE;
+    }
+
+    BrMemSet(&binding, 0, sizeof(binding));
+    binding.binding = 0;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    binding.descriptorCount = 1;
+    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+    BrMemSet(&set_info, 0, sizeof(set_info));
+    set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    set_info.bindingCount = 1;
+    set_info.pBindings = &binding;
+
+    result = gpu.CreateDescriptorSetLayout(device, &set_info, NULL, &target->overlay_set_layout);
+    if (result != VK_SUCCESS)
+        goto fail_modules;
+
+    BrMemSet(&pool_size, 0, sizeof(pool_size));
+    pool_size.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    pool_size.descriptorCount = 1;
+
+    BrMemSet(&pool_info, 0, sizeof(pool_info));
+    pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool_info.maxSets = 1;
+    pool_info.poolSizeCount = 1;
+    pool_info.pPoolSizes = &pool_size;
+
+    result = gpu.CreateDescriptorPool(device, &pool_info, NULL, &target->overlay_descriptor_pool);
+    if (result != VK_SUCCESS)
+        goto fail_set_layout;
+
+    BrMemSet(&allocate_info, 0, sizeof(allocate_info));
+    allocate_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocate_info.descriptorPool = target->overlay_descriptor_pool;
+    allocate_info.descriptorSetCount = 1;
+    allocate_info.pSetLayouts = &target->overlay_set_layout;
+
+    result = gpu.AllocateDescriptorSets(device, &allocate_info, &target->overlay_descriptor_set);
+    if (result != VK_SUCCESS)
+        goto fail_pool;
+
+    BrMemSet(stages, 0, sizeof(stages));
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vertex_module;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = fragment_module;
+    stages[1].pName = "main";
+
+    BrMemSet(&vertex_input, 0, sizeof(vertex_input));
+    vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    BrMemSet(&input_assembly, 0, sizeof(input_assembly));
+    input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    dynamic_states[0] = VK_DYNAMIC_STATE_VIEWPORT;
+    dynamic_states[1] = VK_DYNAMIC_STATE_SCISSOR;
+    BrMemSet(&dynamic, 0, sizeof(dynamic));
+    dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamic.dynamicStateCount = 2;
+    dynamic.pDynamicStates = dynamic_states;
+
+    BrMemSet(&viewport_state, 0, sizeof(viewport_state));
+    viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewport_state.viewportCount = 1;
+    viewport_state.scissorCount = 1;
+
+    BrMemSet(&rasterization, 0, sizeof(rasterization));
+    rasterization.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterization.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterization.cullMode = VK_CULL_MODE_NONE;
+    rasterization.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterization.lineWidth = 1.0f;
+
+    BrMemSet(&multisample, 0, sizeof(multisample));
+    multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    BrMemSet(&depth_stencil, 0, sizeof(depth_stencil));
+    depth_stencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depth_stencil.depthTestEnable = VK_FALSE;
+    depth_stencil.depthWriteEnable = VK_FALSE;
+    depth_stencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+    depth_stencil.depthBoundsTestEnable = VK_FALSE;
+    depth_stencil.stencilTestEnable = VK_FALSE;
+
+    BrMemSet(&blend_attachment, 0, sizeof(blend_attachment));
+    blend_attachment.blendEnable = VK_FALSE;
+    blend_attachment.colorWriteMask =
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    BrMemSet(&blend, 0, sizeof(blend));
+    blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    blend.attachmentCount = 1;
+    blend.pAttachments = &blend_attachment;
+
+    BrMemSet(&layout_info, 0, sizeof(layout_info));
+    layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layout_info.setLayoutCount = 1;
+    layout_info.pSetLayouts = &target->overlay_set_layout;
+
+    result = gpu.CreatePipelineLayout(device, &layout_info, NULL, &target->overlay_pipeline_layout);
+    if (result != VK_SUCCESS)
+        goto fail_pool;
+
+    BrMemSet(&pipeline_info, 0, sizeof(pipeline_info));
+    pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipeline_info.stageCount = 2;
+    pipeline_info.pStages = stages;
+    pipeline_info.pVertexInputState = &vertex_input;
+    pipeline_info.pInputAssemblyState = &input_assembly;
+    pipeline_info.pViewportState = &viewport_state;
+    pipeline_info.pRasterizationState = &rasterization;
+    pipeline_info.pMultisampleState = &multisample;
+    pipeline_info.pDepthStencilState = &depth_stencil;
+    pipeline_info.pColorBlendState = &blend;
+    pipeline_info.pDynamicState = &dynamic;
+    pipeline_info.layout = target->overlay_pipeline_layout;
+    pipeline_info.renderPass = target->render_pass;
+    pipeline_info.subpass = 0;
+
+    result = gpu.CreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info, NULL, &target->overlay_pipeline);
+    if (result != VK_SUCCESS)
+        goto fail_pipeline_layout;
+
+    BrMemSet(&sampler_info, 0, sizeof(sampler_info));
+    sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    sampler_info.magFilter = VK_FILTER_NEAREST;
+    sampler_info.minFilter = VK_FILTER_NEAREST;
+    sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    sampler_info.maxLod = 0.0f;
+
+    result = gpu.CreateSampler(device, &sampler_info, NULL, &target->overlay_sampler);
+    if (result != VK_SUCCESS)
+        goto fail_pipeline;
+
+    gpu.DestroyShaderModule(device, fragment_module, NULL);
+    gpu.DestroyShaderModule(device, vertex_module, NULL);
+
+    GpuVkWriteOverlayDescriptor(target, target->video->overlay_view);
+
+    return BR_TRUE;
+
+fail_pipeline:
+    if (target->overlay_pipeline != VK_NULL_HANDLE) {
+        gpu.DestroyPipeline(device, target->overlay_pipeline, NULL);
+        target->overlay_pipeline = VK_NULL_HANDLE;
+    }
+fail_pipeline_layout:
+    if (target->overlay_pipeline_layout != VK_NULL_HANDLE) {
+        gpu.DestroyPipelineLayout(device, target->overlay_pipeline_layout, NULL);
+        target->overlay_pipeline_layout = VK_NULL_HANDLE;
+    }
+fail_pool:
+    if (target->overlay_descriptor_pool != VK_NULL_HANDLE) {
+        gpu.DestroyDescriptorPool(device, target->overlay_descriptor_pool, NULL);
+        target->overlay_descriptor_pool = VK_NULL_HANDLE;
+        target->overlay_descriptor_set = VK_NULL_HANDLE;
+    }
+fail_set_layout:
+    if (target->overlay_set_layout != VK_NULL_HANDLE) {
+        gpu.DestroyDescriptorSetLayout(device, target->overlay_set_layout, NULL);
+        target->overlay_set_layout = VK_NULL_HANDLE;
+    }
+fail_modules:
+    gpu.DestroyShaderModule(device, fragment_module, NULL);
+    gpu.DestroyShaderModule(device, vertex_module, NULL);
+    return BR_FALSE;
+}
+
 static void GpuVkRetireFlush(vk_gpu_target* target) {
     VkDevice device = target->video->device;
     br_uint_32 i;
@@ -863,21 +1107,39 @@ typedef struct vk_deferred_release {
     VkDevice device;
     VkBuffer buffer;
     VkDeviceMemory memory;
+    VkImage image;
+    VkImageView view;
 } vk_deferred_release;
 
 static vk_deferred_release gpu_deferred[VKREND_GPU_RETIRED_CAPACITY];
 static br_uint_32 gpu_deferred_count;
 
-static void GpuVkDeferBuffer(VkDevice device, VkBuffer buffer, VkDeviceMemory memory) {
+void GpuVkDeferBuffer(VkDevice device, VkBuffer buffer, VkDeviceMemory memory) {
     if (buffer == VK_NULL_HANDLE && memory == VK_NULL_HANDLE)
         return;
 
     if (gpu_deferred_count >= VKREND_GPU_RETIRED_CAPACITY)
         return;
 
+    BrMemSet(&gpu_deferred[gpu_deferred_count], 0, sizeof(gpu_deferred[gpu_deferred_count]));
     gpu_deferred[gpu_deferred_count].device = device;
     gpu_deferred[gpu_deferred_count].buffer = buffer;
     gpu_deferred[gpu_deferred_count].memory = memory;
+    gpu_deferred_count++;
+}
+
+void GpuVkDeferImage(VkDevice device, VkImage image, VkDeviceMemory memory, VkImageView view) {
+    if (image == VK_NULL_HANDLE && memory == VK_NULL_HANDLE && view == VK_NULL_HANDLE)
+        return;
+
+    if (gpu_deferred_count >= VKREND_GPU_RETIRED_CAPACITY)
+        return;
+
+    BrMemSet(&gpu_deferred[gpu_deferred_count], 0, sizeof(gpu_deferred[gpu_deferred_count]));
+    gpu_deferred[gpu_deferred_count].device = device;
+    gpu_deferred[gpu_deferred_count].image = image;
+    gpu_deferred[gpu_deferred_count].memory = memory;
+    gpu_deferred[gpu_deferred_count].view = view;
     gpu_deferred_count++;
 }
 
@@ -885,13 +1147,39 @@ static void GpuVkFlushDeferred(void) {
     br_uint_32 i;
 
     for (i = 0; i < gpu_deferred_count; i++) {
+        VkDevice device = gpu_deferred[i].device;
         VkBuffer buffer = gpu_deferred[i].buffer;
         VkDeviceMemory memory = gpu_deferred[i].memory;
 
-        GpuVkDestroyBuffer(gpu_deferred[i].device, &buffer, &memory);
+        if (gpu_deferred[i].image != VK_NULL_HANDLE || gpu_deferred[i].view != VK_NULL_HANDLE) {
+            if (gpu_deferred[i].view != VK_NULL_HANDLE)
+                gpu.DestroyImageView(device, gpu_deferred[i].view, NULL);
+            if (gpu_deferred[i].image != VK_NULL_HANDLE)
+                gpu.DestroyImage(device, gpu_deferred[i].image, NULL);
+            if (memory != VK_NULL_HANDLE)
+                gpu.FreeMemory(device, memory, NULL);
+        } else {
+            GpuVkDestroyBuffer(device, &buffer, &memory);
+        }
     }
 
     gpu_deferred_count = 0;
+}
+
+void GpuVkResetDeferred(void) {
+    gpu_deferred_count = 0;
+}
+
+void GpuVkResetAfterRecovery(void) {
+    gpu_disabled = BR_FALSE;
+    gpu_loaded = BR_FALSE;
+    gpu_instance = VK_NULL_HANDLE;
+    gpu_targets_logged = BR_FALSE;
+    gpu_draw_logged = BR_FALSE;
+    gpu_texture_failure_logged = BR_FALSE;
+    gpu_texture_capacity_logged = BR_FALSE;
+    gpu_retired_full_logged = BR_FALSE;
+    gpu_frame_logged = BR_FALSE;
 }
 
 static void GpuVkTargetCleanup(vk_gpu_target* target) {
@@ -899,9 +1187,26 @@ static void GpuVkTargetCleanup(vk_gpu_target* target) {
 
     GpuVkRetireFlush(target);
 
-    if (target->fence != VK_NULL_HANDLE) {
-        gpu.DestroyFence(device, target->fence, NULL);
-        target->fence = VK_NULL_HANDLE;
+    if (target->overlay_pipeline != VK_NULL_HANDLE) {
+        gpu.DestroyPipeline(device, target->overlay_pipeline, NULL);
+        target->overlay_pipeline = VK_NULL_HANDLE;
+    }
+    if (target->overlay_pipeline_layout != VK_NULL_HANDLE) {
+        gpu.DestroyPipelineLayout(device, target->overlay_pipeline_layout, NULL);
+        target->overlay_pipeline_layout = VK_NULL_HANDLE;
+    }
+    if (target->overlay_descriptor_pool != VK_NULL_HANDLE) {
+        gpu.DestroyDescriptorPool(device, target->overlay_descriptor_pool, NULL);
+        target->overlay_descriptor_pool = VK_NULL_HANDLE;
+        target->overlay_descriptor_set = VK_NULL_HANDLE;
+    }
+    if (target->overlay_set_layout != VK_NULL_HANDLE) {
+        gpu.DestroyDescriptorSetLayout(device, target->overlay_set_layout, NULL);
+        target->overlay_set_layout = VK_NULL_HANDLE;
+    }
+    if (target->overlay_sampler != VK_NULL_HANDLE) {
+        gpu.DestroySampler(device, target->overlay_sampler, NULL);
+        target->overlay_sampler = VK_NULL_HANDLE;
     }
     if (target->pipeline != VK_NULL_HANDLE) {
         gpu.DestroyPipeline(device, target->pipeline, NULL);
@@ -933,10 +1238,6 @@ static void GpuVkTargetCleanup(vk_gpu_target* target) {
         target->vertex_shader = VK_NULL_HANDLE;
     }
 
-    GpuVkDestroyBuffer(device, &target->readback_buffer, &target->readback_memory);
-    target->readback_mapped = NULL;
-    GpuVkDestroyBuffer(device, &target->staging_buffer, &target->staging_memory);
-    target->staging_mapped = NULL;
     GpuVkDestroyBuffer(device, &target->white_staging_buffer, &target->white_staging_memory);
     GpuVkDestroyBuffer(device, &target->ubo_buffer, &target->ubo_memory);
     target->ubo_mapped = NULL;
@@ -961,6 +1262,20 @@ void GpuVkTargetDestroy(vk_gpu_target** ptarget) {
     if (target == NULL)
         return;
 
+    if (target->video != NULL && target->video->present_target == target) {
+        target->video->present_target = NULL;
+        target->video->frame_has_scene = BR_FALSE;
+    }
+
+    if (target->video != NULL && target->video->scene_recording) {
+        if (target->in_scene) {
+            target->video->scene_recording = BR_FALSE;
+            GpuVkDisable("target destroyed during scene");
+        } else {
+            GpuVkFrameEnd(target->video);
+        }
+    }
+
     if (target->video != NULL && target->video->active && target->video->generation == target->generation) {
         if (gpu.DeviceWaitIdle != NULL)
             gpu.DeviceWaitIdle(target->video->device);
@@ -975,12 +1290,12 @@ static br_boolean GpuVkTargetInit(vk_gpu_target* target) {
     br_vk_video* video = target->video;
     VkPhysicalDeviceProperties properties;
     VkFormatProperties format_properties;
-    VkFormatFeatureFlags colour_required = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+    VkFormatFeatureFlags colour_required = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
+        | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
     VkFormatFeatureFlags depth_required = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
     VkDeviceSize ubo_size;
-    VkDeviceSize readback_size;
-    VkDeviceSize staging_size;
-    VkFenceCreateInfo fence_info;
+
+    target->colour_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     gpu.GetPhysicalDeviceFormatProperties(video->physical_device, VK_FORMAT_R8G8B8A8_UNORM, &format_properties);
     if ((format_properties.optimalTilingFeatures & colour_required) != colour_required)
@@ -991,7 +1306,7 @@ static br_boolean GpuVkTargetInit(vk_gpu_target* target) {
         return BR_FALSE;
 
     if (!GpuVkCreateImage(video, target->width, target->height, VK_FORMAT_R8G8B8A8_UNORM,
-            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
             VK_IMAGE_ASPECT_COLOR_BIT, &target->colour_image, &target->colour_memory, &target->colour_view))
         return BR_FALSE;
 
@@ -1016,16 +1331,6 @@ static br_boolean GpuVkTargetInit(vk_gpu_target* target) {
             &target->ubo_memory, (void**)&target->ubo_mapped))
         return BR_FALSE;
 
-    readback_size = (VkDeviceSize)target->width * 4 * target->height;
-    if (!GpuVkCreateBuffer(video, readback_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &target->readback_buffer,
-            &target->readback_memory, (void**)&target->readback_mapped))
-        return BR_FALSE;
-
-    staging_size = (VkDeviceSize)target->width * 4 * target->height;
-    if (!GpuVkCreateBuffer(video, staging_size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &target->staging_buffer,
-            &target->staging_memory, (void**)&target->staging_mapped))
-        return BR_FALSE;
-
     if (!GpuVkCreateRenderPass(target))
         return BR_FALSE;
 
@@ -1035,11 +1340,7 @@ static br_boolean GpuVkTargetInit(vk_gpu_target* target) {
     if (!GpuVkCreatePipeline(target))
         return BR_FALSE;
 
-    BrMemSet(&fence_info, 0, sizeof(fence_info));
-    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-
-    if (gpu.CreateFence(video->device, &fence_info, NULL, &target->fence) != VK_SUCCESS)
+    if (!GpuVkCreateOverlayPipeline(target))
         return BR_FALSE;
 
     return BR_TRUE;
@@ -1181,7 +1482,8 @@ static VkDescriptorSet GpuVkMaterialDescriptor(vk_gpu_target* target, vk_gpu_mat
 
     for (i = 0; i < target->texture_set_count; i++) {
         if (target->texture_sets[i].stored == material->colour_map
-            && target->texture_sets[i].view == texture.view) {
+            && target->texture_sets[i].view == texture.view
+            && target->texture_sets[i].generation == texture.generation) {
             target->texture_sets[i].used_frame = target->frame_sequence;
             target->texture_sets[i].generation = texture.generation;
 
@@ -1230,130 +1532,6 @@ static VkDescriptorSet GpuVkMaterialDescriptor(vk_gpu_target* target, vk_gpu_mat
     material->texture_width = texture.width;
     material->texture_height = texture.height;
     return target->texture_sets[target->texture_set_count - 1].set;
-}
-
-static void GpuVkReadback(vk_gpu_target* target) {
-    struct br_device_pixelmap* pixelmap = target->pixelmap;
-    br_int_32 row_bytes;
-    br_size_t base;
-    br_uint_32 x;
-    br_uint_32 y;
-
-    if (pixelmap == NULL || pixelmap->shadow == NULL || target->readback_mapped == NULL)
-        return;
-
-    row_bytes = pixelmap->pm_row_bytes;
-    if (row_bytes < 0)
-        row_bytes = -row_bytes;
-
-    base = (br_size_t)pixelmap->pm_base_y * (br_size_t)row_bytes + (br_size_t)pixelmap->pm_base_x * 2;
-
-    for (y = 0; y < target->height; y++) {
-        br_uint_16* destination =
-            (br_uint_16*)((br_uint_8*)pixelmap->shadow + base + (br_size_t)y * (br_size_t)row_bytes);
-        const br_uint_32* source =
-            (const br_uint_32*)(target->readback_mapped + (br_size_t)y * target->width * 4);
-
-        for (x = 0; x < target->width; x++) {
-            br_uint_32 value = source[x];
-
-            destination[x] = (br_uint_16)((((value & 0xFFu) >> 3) << 11) | ((((value >> 8) & 0xFFu) >> 2) << 5)
-                | (((value >> 16) & 0xFFu) >> 3));
-        }
-    }
-}
-
-static br_boolean GpuVkUploadScene(vk_gpu_target* target, VkCommandBuffer command_buffer) {
-    struct br_device_pixelmap* pixelmap = target->pixelmap;
-    VkBufferMemoryBarrier buffer_barrier;
-    VkImageMemoryBarrier image_barrier;
-    VkBufferImageCopy region;
-    br_int_32 row_bytes;
-    br_size_t base;
-    br_uint_32 x;
-    br_uint_32 y;
-
-    if (pixelmap == NULL || pixelmap->shadow == NULL || target->staging_mapped == NULL)
-        return BR_FALSE;
-
-    row_bytes = pixelmap->pm_row_bytes;
-    if (row_bytes < 0)
-        row_bytes = -row_bytes;
-
-    base = (br_size_t)pixelmap->pm_base_y * (br_size_t)row_bytes + (br_size_t)pixelmap->pm_base_x * 2;
-
-    for (y = 0; y < target->height; y++) {
-        const br_uint_16* source =
-            (const br_uint_16*)((const br_uint_8*)pixelmap->shadow + base + (br_size_t)y * (br_size_t)row_bytes);
-        br_uint_8* destination = target->staging_mapped + (br_size_t)y * target->width * 4;
-
-        for (x = 0; x < target->width; x++) {
-            br_uint_16 value = source[x];
-
-            destination[x * 4 + 0] = (br_uint_8)((value >> 11) << 3);
-            destination[x * 4 + 1] = (br_uint_8)(((value >> 5) & 0x3f) << 2);
-            destination[x * 4 + 2] = (br_uint_8)((value & 0x1f) << 3);
-            destination[x * 4 + 3] = 255;
-        }
-    }
-
-    BrMemSet(&buffer_barrier, 0, sizeof(buffer_barrier));
-    buffer_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    buffer_barrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-    buffer_barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    buffer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    buffer_barrier.buffer = target->staging_buffer;
-    buffer_barrier.offset = 0;
-    buffer_barrier.size = VK_WHOLE_SIZE;
-
-    gpu.CmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 1,
-        &buffer_barrier, 0, NULL);
-
-    BrMemSet(&image_barrier, 0, sizeof(image_barrier));
-    image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    image_barrier.oldLayout = target->initialised ? VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
-    image_barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    image_barrier.srcAccessMask = target->initialised ? VK_ACCESS_TRANSFER_READ_BIT : 0;
-    image_barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    image_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    image_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    image_barrier.image = target->colour_image;
-    image_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    image_barrier.subresourceRange.levelCount = 1;
-    image_barrier.subresourceRange.layerCount = 1;
-
-    gpu.CmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0,
-        NULL, 1, &image_barrier);
-
-    BrMemSet(&region, 0, sizeof(region));
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.layerCount = 1;
-    region.imageExtent.width = target->width;
-    region.imageExtent.height = target->height;
-    region.imageExtent.depth = 1;
-
-    gpu.CmdCopyBufferToImage(command_buffer, target->staging_buffer, target->colour_image,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-
-    BrMemSet(&image_barrier, 0, sizeof(image_barrier));
-    image_barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    image_barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    image_barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    image_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    image_barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    image_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    image_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    image_barrier.image = target->colour_image;
-    image_barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    image_barrier.subresourceRange.levelCount = 1;
-    image_barrier.subresourceRange.layerCount = 1;
-
-    gpu.CmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-        0, 0, NULL, 0, NULL, 1, &image_barrier);
-
-    target->initialised = BR_TRUE;
-    return BR_TRUE;
 }
 
 static void GpuVkUploadWhiteTexture(vk_gpu_target* target, VkCommandBuffer command_buffer) {
@@ -1421,53 +1599,176 @@ static void GpuVkUploadWhiteTexture(vk_gpu_target* target, VkCommandBuffer comma
     target->white_ready = BR_TRUE;
 }
 
+static void GpuVkClearTargetColour(vk_gpu_target* target, VkCommandBuffer command_buffer) {
+    VkImageMemoryBarrier barrier;
+    VkClearColorValue clear;
+    VkImageSubresourceRange range;
+    VkPipelineStageFlags source_stage;
+    VkAccessFlags source_access;
+
+    if (target->colour_layout == VK_IMAGE_LAYOUT_UNDEFINED) {
+        source_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        source_access = 0;
+    } else if (target->colour_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        source_stage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        source_access = VK_ACCESS_SHADER_READ_BIT;
+    } else if (target->colour_layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+        source_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        source_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    } else {
+        source_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        source_access = VK_ACCESS_TRANSFER_WRITE_BIT;
+    }
+
+    BrMemSet(&barrier, 0, sizeof(barrier));
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = target->colour_layout;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcAccessMask = source_access;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = target->colour_image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+
+    gpu.CmdPipelineBarrier(command_buffer, source_stage, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1,
+        &barrier);
+
+    BrMemSet(&clear, 0, sizeof(clear));
+    clear.float32[3] = 1.0f;
+
+    BrMemSet(&range, 0, sizeof(range));
+    range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    range.levelCount = 1;
+    range.layerCount = 1;
+
+    gpu.CmdClearColorImage(command_buffer, target->colour_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1,
+        &range);
+
+    BrMemSet(&barrier, 0, sizeof(barrier));
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = target->colour_image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+
+    gpu.CmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        0, 0, NULL, 0, NULL, 1, &barrier);
+
+    target->colour_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+}
+
+static br_boolean GpuVkUploadOverlayUnder(vk_gpu_target* target, VkCommandBuffer command_buffer) {
+    br_vk_video* video = target->video;
+    struct br_device_pixelmap* pixelmap = target->pixelmap;
+    br_int_32 row_bytes;
+    br_size_t base;
+
+    if (pixelmap == NULL || pixelmap->shadow == NULL)
+        return BR_FALSE;
+    if (target->width != video->overlay_width || target->height != video->overlay_height)
+        return BR_FALSE;
+
+    row_bytes = pixelmap->pm_row_bytes;
+    if (row_bytes < 0)
+        row_bytes = -row_bytes;
+
+    base = (br_size_t)pixelmap->pm_base_y * (br_size_t)row_bytes + (br_size_t)pixelmap->pm_base_x * 2;
+
+    VIDEOVkOverlayUpload(video, command_buffer, (const br_uint_8*)pixelmap->shadow, target->width, target->height,
+        row_bytes, base);
+
+    if (target->overlay_generation != video->overlay_generation)
+        GpuVkWriteOverlayDescriptor(target, video->overlay_view);
+
+    GpuVkShadowResetKey(pixelmap);
+
+    return BR_TRUE;
+}
+
 static br_boolean GpuVkBeginScene(vk_gpu_target* target) {
     br_vk_video* video = target->video;
-    VkCommandBuffer command_buffer = video->command_buffer;
+    VkCommandBuffer command_buffer = video->scene_command_buffer;
     VkCommandBufferBeginInfo begin_info;
     VkRenderPassBeginInfo render_pass_info;
     VkClearValue clear_values[2];
     VkViewport viewport;
     VkRect2D scissor;
+    br_boolean overlay_drawn;
     VkResult result;
 
     if (command_buffer == VK_NULL_HANDLE)
         return BR_FALSE;
 
-    result = gpu.WaitForFences(video->device, 1, &video->fence, VK_TRUE, UINT64_MAX);
-    if (result != VK_SUCCESS) {
-        GpuVkRecordResult("begin fence wait", result);
-        return BR_FALSE;
+    if (!video->scene_recording) {
+        if (video->scene_fence_pending) {
+            result = gpu.WaitForFences(video->device, 1, &video->scene_fence, VK_TRUE, UINT64_MAX);
+            if (result != VK_SUCCESS) {
+                GpuVkRecordResult("scene fence wait", result);
+                return BR_FALSE;
+            }
+
+            result = gpu.ResetFences(video->device, 1, &video->scene_fence);
+            if (result != VK_SUCCESS) {
+                GpuVkRecordResult("scene fence reset", result);
+                return BR_FALSE;
+            }
+
+            video->scene_fence_pending = BR_FALSE;
+        }
+
+        result = gpu.WaitForFences(video->device, 1, &video->fence, VK_TRUE, UINT64_MAX);
+        if (result != VK_SUCCESS) {
+            GpuVkRecordResult("present fence wait", result);
+            return BR_FALSE;
+        }
+
+        GpuVkFlushDeferred();
+        video->pixel_slot = 0;
+
+        result = gpu.ResetCommandBuffer(command_buffer, 0);
+        if (result != VK_SUCCESS) {
+            GpuVkRecordResult("scene command buffer reset", result);
+            return BR_FALSE;
+        }
+
+        GpuVkRetireFlush(target);
+
+        BrMemSet(&begin_info, 0, sizeof(begin_info));
+        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+        result = gpu.BeginCommandBuffer(command_buffer, &begin_info);
+        if (result != VK_SUCCESS) {
+            GpuVkRecordResult("scene command buffer begin", result);
+            return BR_FALSE;
+        }
+
+        video->scene_recording = BR_TRUE;
+        video->frame_epoch++;
+        video->frame_has_scene = BR_FALSE;
     }
 
-    GpuVkFlushDeferred();
-
-    result = gpu.ResetFences(video->device, 1, &video->fence);
-    if (result != VK_SUCCESS) {
-        GpuVkRecordResult("begin fence reset", result);
-        return BR_FALSE;
+    if (target->frame_epoch != video->frame_epoch) {
+        target->frame_epoch = video->frame_epoch;
+        target->ubo_slot = 0;
+        GpuVkClearTargetColour(target, command_buffer);
     }
 
-    result = gpu.ResetCommandBuffer(command_buffer, 0);
-    if (result != VK_SUCCESS) {
-        GpuVkRecordResult("command buffer reset", result);
-        return BR_FALSE;
+    overlay_drawn = BR_FALSE;
+    if (target->overlay_epoch != video->frame_epoch) {
+        target->overlay_epoch = video->frame_epoch;
+        overlay_drawn = GpuVkUploadOverlayUnder(target, command_buffer);
     }
 
-    GpuVkRetireFlush(target);
-
-    BrMemSet(&begin_info, 0, sizeof(begin_info));
-    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-
-    result = gpu.BeginCommandBuffer(command_buffer, &begin_info);
-    if (result != VK_SUCCESS) {
-        GpuVkRecordResult("command buffer begin", result);
-        return BR_FALSE;
-    }
-
-    if (!GpuVkUploadScene(target, command_buffer))
-        return BR_FALSE;
     GpuVkUploadWhiteTexture(target, command_buffer);
 
     BrMemSet(clear_values, 0, sizeof(clear_values));
@@ -1498,73 +1799,160 @@ static br_boolean GpuVkBeginScene(vk_gpu_target* target) {
     scissor.extent.height = target->height;
     gpu.CmdSetScissor(command_buffer, 0, 1, &scissor);
 
+    if (overlay_drawn && target->overlay_pipeline != VK_NULL_HANDLE
+        && target->overlay_descriptor_set != VK_NULL_HANDLE) {
+        gpu.CmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, target->overlay_pipeline);
+        gpu.CmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, target->overlay_pipeline_layout, 0, 1,
+            &target->overlay_descriptor_set, 0, NULL);
+        gpu.CmdDraw(command_buffer, 3, 1, 0, 0);
+    }
+
     gpu.CmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, target->pipeline);
 
     target->frame_sequence++;
-    target->ubo_slot = 0;
     target->in_scene = BR_TRUE;
     return BR_TRUE;
 }
 
 static br_boolean GpuVkEndScene(vk_gpu_target* target) {
     br_vk_video* video = target->video;
-    VkCommandBuffer command_buffer = video->command_buffer;
-    VkBufferImageCopy region;
-    VkBufferMemoryBarrier buffer_barrier;
+
+    if (video->scene_command_buffer == VK_NULL_HANDLE || !video->scene_recording)
+        return BR_FALSE;
+
+    gpu.CmdEndRenderPass(video->scene_command_buffer);
+
+    return BR_TRUE;
+}
+
+void GpuVkFrameEnd(br_vk_video* video) {
     VkSubmitInfo submit_info;
     VkResult result;
 
-    gpu.CmdEndRenderPass(command_buffer);
+    if (video == NULL || !video->scene_recording)
+        return;
 
-    BrMemSet(&region, 0, sizeof(region));
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.layerCount = 1;
-    region.imageExtent.width = target->width;
-    region.imageExtent.height = target->height;
-    region.imageExtent.depth = 1;
+    video->scene_recording = BR_FALSE;
 
-    gpu.CmdCopyImageToBuffer(command_buffer, target->colour_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        target->readback_buffer, 1, &region);
+    if (gpu_disabled)
+        return;
 
-    BrMemSet(&buffer_barrier, 0, sizeof(buffer_barrier));
-    buffer_barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    buffer_barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    buffer_barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-    buffer_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    buffer_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    buffer_barrier.buffer = target->readback_buffer;
-    buffer_barrier.offset = 0;
-    buffer_barrier.size = VK_WHOLE_SIZE;
-
-    gpu.CmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 0, NULL, 1,
-        &buffer_barrier, 0, NULL);
-
-    result = gpu.EndCommandBuffer(command_buffer);
+    result = gpu.EndCommandBuffer(video->scene_command_buffer);
     if (result != VK_SUCCESS) {
-        GpuVkRecordResult("end command buffer", result);
-        return BR_FALSE;
+        GpuVkRecordResult("scene command buffer end", result);
+        GpuVkDisable("frame end");
+        return;
     }
 
     BrMemSet(&submit_info, 0, sizeof(submit_info));
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &command_buffer;
+    submit_info.pCommandBuffers = &video->scene_command_buffer;
 
-    result = gpu.QueueSubmit(video->queue, 1, &submit_info, video->fence);
+    result = gpu.QueueSubmit(video->queue, 1, &submit_info, video->scene_fence);
     if (result != VK_SUCCESS) {
-        GpuVkRecordResult("queue submit", result);
-        return BR_FALSE;
+        GpuVkRecordResult("scene queue submit", result);
+        GpuVkDisable("frame submit");
+        return;
     }
 
-    result = gpu.WaitForFences(video->device, 1, &video->fence, VK_TRUE, UINT64_MAX);
+    video->scene_fence_pending = BR_TRUE;
+
+    result = gpu.WaitForFences(video->device, 1, &video->scene_fence, VK_TRUE, UINT64_MAX);
     if (result != VK_SUCCESS) {
-        GpuVkRecordResult("end fence wait", result);
-        return BR_FALSE;
+        GpuVkRecordResult("scene fence wait", result);
+        GpuVkDisable("frame fence wait");
+        return;
     }
 
-    GpuVkReadback(target);
+    result = gpu.ResetFences(video->device, 1, &video->scene_fence);
+    if (result != VK_SUCCESS) {
+        GpuVkRecordResult("scene fence reset", result);
+        GpuVkDisable("frame fence reset");
+        return;
+    }
 
-    return BR_TRUE;}
+    video->scene_fence_pending = BR_FALSE;
+
+    if (!gpu_frame_logged) {
+        gpu_frame_logged = BR_TRUE;
+        BrLogPrintf("VKREND: gpu frame compositor active\n");
+        GpuVkLogMarker("%s", "VKREND: gpu frame compositor active");
+    }
+}
+
+VkImageView GpuVkPresentView(br_vk_video* video, struct vk_gpu_target* target) {
+    if (video == NULL || target == NULL || !gpu_loaded)
+        return VK_NULL_HANDLE;
+    if (target->video != video || target->generation != video->generation)
+        return VK_NULL_HANDLE;
+
+    return target->colour_view;
+}
+
+void GpuVkPresentPrepare(br_vk_video* video, struct vk_gpu_target* target, VkCommandBuffer command_buffer) {
+    VkImageMemoryBarrier barrier;
+    VkPipelineStageFlags source_stage;
+    VkAccessFlags source_access;
+
+    if (GpuVkPresentView(video, target) == VK_NULL_HANDLE)
+        return;
+    if (target->colour_layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+        return;
+
+    if (target->colour_layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+        source_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        source_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    } else if (target->colour_layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        source_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        source_access = VK_ACCESS_TRANSFER_WRITE_BIT;
+    } else {
+        source_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        source_access = 0;
+    }
+
+    BrMemSet(&barrier, 0, sizeof(barrier));
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = target->colour_layout;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = source_access;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = target->colour_image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+
+    gpu.CmdPipelineBarrier(command_buffer, source_stage, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL,
+        1, &barrier);
+
+    target->colour_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+}
+
+void GpuVkShadowResetKey(struct br_device_pixelmap* pixelmap) {
+    br_int_32 row_bytes;
+    br_size_t base;
+    br_uint_32 x;
+    br_uint_32 y;
+
+    if (pixelmap == NULL || pixelmap->shadow == NULL || pixelmap->pm_width <= 0 || pixelmap->pm_height <= 0)
+        return;
+
+    row_bytes = pixelmap->pm_row_bytes;
+    if (row_bytes < 0)
+        row_bytes = -row_bytes;
+
+    base = (br_size_t)pixelmap->pm_base_y * (br_size_t)row_bytes + (br_size_t)pixelmap->pm_base_x * 2;
+
+    for (y = 0; y < (br_uint_32)pixelmap->pm_height; y++) {
+        br_uint_16* row =
+            (br_uint_16*)((br_uint_8*)pixelmap->shadow + base + (br_size_t)y * (br_size_t)row_bytes);
+
+        for (x = 0; x < (br_uint_32)pixelmap->pm_width; x++)
+            row[x] = 0xF81F;
+    }
+}
 
 void GpuVkSceneBeginRenderer(br_renderer* renderer) {
     br_device_pixelmap* colour;
@@ -1587,6 +1975,13 @@ void GpuVkSceneBeginRenderer(br_renderer* renderer) {
     if (!GpuVkLoadFunctions(video->instance)) {
         GpuVkDisable("function loading");
         return;
+    }
+
+    if (!video->scene_recording) {
+        if (!VIDEOVkOverlayEnsure(video, (br_uint_32)colour->pm_width, (br_uint_32)colour->pm_height)) {
+            GpuVkDisable("overlay creation");
+            return;
+        }
     }
 
     target = colour->gpu_target;
@@ -1661,6 +2056,12 @@ void GpuVkSceneEndRenderer(br_renderer* renderer) {
         if (colour != NULL && colour->gpu_target == target)
             GpuVkTargetDestroy(&colour->gpu_target);
         GpuVkDisable("scene end");
+        return;
+    }
+
+    if (target->video != NULL && !target->video->frame_has_scene) {
+        target->video->present_target = target;
+        target->video->frame_has_scene = BR_TRUE;
     }
 }
 
@@ -1760,25 +2161,36 @@ static br_boolean GpuVkGeometryUpload(vk_gpu_geometry* geometry, const struct v1
 
     {
         br_uint_16* next = indices;
+        br_uint_32 skipped_faces = 0;
 
         for (group = 0; group < model->ngroups; group++) {
             const struct v11group* gp = &model->groups[group];
+            br_uint_32 index_count = 0;
 
             geometry->ranges[group].first_index = index_offset;
-            geometry->ranges[group].index_count = (br_uint_32)gp->nfaces * 3;
 
             for (br_uint_16 f = 0; f < gp->nfaces; f++) {
                 const br_vector3_u16* fp = &gp->vertex_numbers[f];
+
+                if (fp->v[0] >= gp->nvertices || fp->v[1] >= gp->nvertices || fp->v[2] >= gp->nvertices) {
+                    skipped_faces++;
+                    continue;
+                }
 
                 next[0] = (br_uint_16)(fp->v[0] + vertex_offset);
                 next[1] = (br_uint_16)(fp->v[1] + vertex_offset);
                 next[2] = (br_uint_16)(fp->v[2] + vertex_offset);
                 next += 3;
+                index_count += 3;
             }
 
-            index_offset += geometry->ranges[group].index_count;
+            geometry->ranges[group].index_count = index_count;
+            index_offset += index_count;
             vertex_offset = (br_uint_16)(vertex_offset + gp->nvertices);
         }
+
+        if (skipped_faces > 0)
+            BrLogPrintf("VKREND: skipped %u faces with out-of-range vertex indices\n", (unsigned)skipped_faces);
     }
 
     if (!GpuVkCreateBuffer(geometry->video, vertex_bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, &geometry->vertex_buffer,
@@ -1841,7 +2253,7 @@ static vk_gpu_geometry* GpuVkGeometryEnsure(br_geometry_stored* stored, br_vk_vi
 
 static void GpuVkDrawGeometry(vk_gpu_target* target, br_renderer* renderer, vk_gpu_geometry* geometry,
     const struct v11model* model, struct br_renderer_state_stored* default_state) {
-    VkCommandBuffer command_buffer = target->video->command_buffer;
+    VkCommandBuffer command_buffer = target->video->scene_command_buffer;
     VkDeviceSize vertex_buffer_offset = 0;
     br_uint_16 group;
 
@@ -1871,6 +2283,7 @@ static void GpuVkDrawGeometry(vk_gpu_target* target, br_renderer* renderer, vk_g
 
         gpu.CmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, target->pipeline_layout, 0, 1,
             &descriptor_set, 1, &ubo_offset);
+
         gpu.CmdDrawIndexed(command_buffer, geometry->ranges[group].index_count, 1,
             geometry->ranges[group].first_index, 0, 0);
     }
