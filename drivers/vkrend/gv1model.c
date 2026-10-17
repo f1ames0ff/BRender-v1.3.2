@@ -94,15 +94,49 @@ static br_error BR_CMETHOD_DECL(br_geometry_v1_model_vk, storedNew)(struct br_ge
     return BRE_OK;
 }
 
+static br_error RenderV1Model(br_geometry_v1_model* self, br_renderer* renderer, struct v11model_f* model,
+    struct br_renderer_state_stored* default_state) {
+    struct v11model* prepared;
+    br_uint_32 triangles;
+    br_uint_32 vertices;
+    br_uint_16 group;
+
+    (void)self;
+
+    if (renderer == NULL || renderer->gpu_scene == NULL)
+        return BRE_FAIL;
+
+    prepared = (struct v11model*)model;
+
+    if (prepared == NULL || prepared->groups == NULL || prepared->ngroups == 0)
+        return BRE_FAIL;
+
+    triangles = 0;
+    vertices = 0;
+
+    for (group = 0; group < prepared->ngroups; group++) {
+        triangles += prepared->groups[group].nfaces;
+        vertices += prepared->groups[group].nvertices;
+    }
+
+    if (GpuVkRenderV1Model(prepared, renderer, default_state) != BR_TRUE)
+        return BRE_FAIL;
+
+    renderer->scene_stats.face_group_count += prepared->ngroups;
+    renderer->scene_stats.triangles_drawn_count += triangles;
+    renderer->scene_stats.triangles_rendered_count += triangles;
+    renderer->scene_stats.vertices_rendered_count += vertices;
+    renderer->frame_stats.model_count++;
+
+    return BRE_OK;
+}
+
 static br_error BR_CMETHOD_DECL(br_geometry_v1_model_vk, render)(struct br_geometry_v1_model* self,
     struct br_renderer* renderer, struct v11model_f* model, struct br_renderer_state_stored* default_state,
     br_token type) {
-    (void)self;
-    (void)renderer;
-    (void)model;
-    (void)default_state;
     (void)type;
-    return BRE_OK;
+
+    return RenderV1Model(self, renderer, model, default_state);
 }
 
 static const struct br_geometry_v1_model_dispatch geometryV1ModelDispatch = {

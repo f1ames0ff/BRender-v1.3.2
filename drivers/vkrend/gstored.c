@@ -89,6 +89,7 @@ br_geometry_stored* GeometryStoredVkAllocate(br_geometry_v1_model* gv1model, con
     self->gv1model = gv1model;
     self->shared = BR_TRUE;
     self->model = model;
+    self->gpu = NULL;
 
     self->ngroups = model->ngroups;
     self->total_faces = 0;
@@ -107,6 +108,9 @@ static void BR_CMETHOD_DECL(br_geometry_stored_vk, free)(br_object* _self) {
     br_geometry_stored* self = (br_geometry_stored*)_self;
 
     ObjectContainerRemove(self->gv1model->renderer_facility, (br_object*)self);
+
+    GpuVkGeometryRelease(self->gpu);
+    self->gpu = NULL;
 
     BrResFreeNoCallback(self);
 }
@@ -145,7 +149,8 @@ static struct br_tv_template* BR_CMETHOD_DECL(br_geometry_stored_vk, templateQue
     return self->device->templates.geometryStoredTemplate;
 }
 
-static br_error RenderStored(br_geometry_stored* self, br_renderer* renderer) {
+static br_error RenderStored(br_geometry_stored* self, br_renderer* renderer,
+    struct br_renderer_state_stored* default_state) {
     GeometryStoredVkCaptureDraw(self, renderer);
 
     renderer->scene_stats.face_group_count += self->ngroups;
@@ -154,21 +159,19 @@ static br_error RenderStored(br_geometry_stored* self, br_renderer* renderer) {
     renderer->scene_stats.vertices_rendered_count += self->total_vertices;
     renderer->frame_stats.model_count++;
 
+    GpuVkRenderStored(self, renderer, default_state);
+
     return BRE_OK;
 }
 
 static br_error BR_CMETHOD(br_geometry_stored_vk, render)(br_geometry_stored* self, br_renderer* renderer,
     struct br_renderer_state_stored* default_state) {
-    (void)default_state;
-
-    return RenderStored(self, renderer);
+    return RenderStored(self, renderer, default_state);
 }
 
 static br_error BR_CMETHOD(br_geometry_stored_vk, renderOnScreen)(br_geometry_stored* self, br_renderer* renderer,
     struct br_renderer_state_stored* default_state) {
-    (void)default_state;
-
-    return RenderStored(self, renderer);
+    return RenderStored(self, renderer, default_state);
 }
 
 static const struct br_geometry_stored_dispatch geometryStoredDispatch = {

@@ -60,7 +60,10 @@ typedef struct br_vk_video {
     br_int_32 window_height;
     br_boolean active;
     br_int_32 recovery_attempted;
+    br_uint_32 generation;
 } br_vk_video;
+
+PFN_vkGetInstanceProcAddr VIDEOVkGetInstanceProcAddr(void);
 
 #ifdef __cplusplus
 };

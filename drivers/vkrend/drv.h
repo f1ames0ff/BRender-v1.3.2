@@ -16,6 +16,7 @@ extern "C" {
 #define BR_BUFFER_STORED_PRIVATE
 #define BR_GEOMETRY_V1_MODEL_PRIVATE
 #define BR_GEOMETRY_STORED_PRIVATE
+#define BR_DEVICE_CLUT_PRIVATE
 
 #include "brddi.h"
 #include "fw_p.h"
@@ -27,6 +28,7 @@ extern "C" {
 #include "video.h"
 #include "template.h"
 #include "device.h"
+#include "devclut.h"
 #include "outfcty.h"
 #include "devpixmp.h"
 #include "rendfcty.h"
@@ -36,6 +38,7 @@ extern "C" {
 #include "sbuffer.h"
 #include "gv1model.h"
 #include "gstored.h"
+#include "gpu.h"
 
 #define BRT(t) BRT_##t, 0
 #define DEV(t) 0, #t

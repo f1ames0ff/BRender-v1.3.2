@@ -21,10 +21,14 @@ typedef struct br_device_pixelmap {
 
     struct br_device_pixelmap* screen;
 
+    struct br_device_clut* clut;
+
     br_boolean sub_pixelmap;
     br_uint_16 parent_height;
 
     void* shadow;
+
+    struct vk_gpu_target* gpu_target;
 
     br_device_vkrend_callback_procs callbacks;
 

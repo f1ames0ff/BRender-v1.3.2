@@ -21,6 +21,8 @@ typedef struct br_renderer {
 
     vk_state_all state;
 
+    struct vk_gpu_target* gpu_scene;
+
     int has_begun;
 
     struct {

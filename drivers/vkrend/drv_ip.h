@@ -9,6 +9,8 @@ extern "C" {
 
 br_device* DeviceVkAllocate(const char* identifier, const char* arguments);
 
+br_device_clut* DeviceClutVkAllocate(br_device* dev, const char* identifier);
+
 br_output_facility* OutputFacilityVkInit(br_device* dev, br_renderer_facility* rendfcty);
 
 br_renderer_facility* RendererFacilityVkInit(br_device* dev);

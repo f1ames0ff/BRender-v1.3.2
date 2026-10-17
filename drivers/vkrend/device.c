@@ -75,6 +75,13 @@ br_device* DeviceVkAllocate(const char* identifier, const char* arguments) {
         return NULL;
     }
 
+    self->clut = DeviceClutVkAllocate(self, "Pseudo-CLUT");
+
+    if (self->clut == NULL) {
+        BrResFreeNoCallback(self);
+        return NULL;
+    }
+
     return self;
 }
 

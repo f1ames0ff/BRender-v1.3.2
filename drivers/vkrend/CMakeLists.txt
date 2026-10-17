@@ -12,6 +12,8 @@ set(VKREND_FILES
         driver.c
         device.c
         device.h
+        devclut.c
+        devclut.h
         video.c
         video.h
         outfcty.c
@@ -40,6 +42,8 @@ set(VKREND_FILES
         gv1model.h
         gstored.c
         gstored.h
+        gpu.c
+        gpu.h
         onscreen.c
         vkshaders.h
         drv.h

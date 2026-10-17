@@ -111,10 +111,21 @@ static br_error BR_CMETHOD_DECL(br_output_facility_vk, pixelmapNew)(br_output_fa
 
 static br_error BR_CMETHOD_DECL(br_output_facility_vk, clutNew)(br_output_facility* self, br_device_clut** pclut,
     br_token_value* tv) {
-    (void)self;
-    (void)pclut;
+    br_device_clut* clut;
+
     (void)tv;
-    return BRE_FAIL;
+
+    if (pclut == NULL)
+        return BRE_FAIL;
+
+    clut = DeviceClutVkAllocate(self->device, "New-CLUT");
+
+    if (clut == NULL)
+        return BRE_FAIL;
+
+    *pclut = clut;
+
+    return BRE_OK;
 }
 
 static br_error BR_CMETHOD_DECL(br_output_facility_vk, queryCapability)(br_output_facility* self,

@@ -1,10 +1,14 @@
 #include "drv.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "vkshaders.h"
 
 static PFN_vkGetInstanceProcAddr gpa;
+
+static br_uint_32 video_generation_counter;
 
 static PFN_vkCreateInstance pCreateInstance;
 static PFN_vkEnumerateInstanceExtensionProperties pEnumerateInstanceExtensionProperties;
@@ -349,8 +353,53 @@ static void video_destroy_image(br_vk_video* video, VkImage* image, VkDeviceMemo
     }
 }
 
+static VkDebugUtilsMessengerEXT video_debug_messenger;
+
+static VkBool32 VKAPI_CALL video_debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+    VkDebugUtilsMessageTypeFlagsEXT type, const VkDebugUtilsMessengerCallbackDataEXT* data, void* user) {
+    const char* level = (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? "ERROR" : "WARN";
+    FILE* file;
+
+    (void)type;
+    (void)user;
+
+    if (!(severity
+            & (VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT)))
+        return VK_FALSE;
+
+    file = fopen("vkrend_validation.txt", "a");
+    if (file != NULL) {
+        fprintf(file, "%s: %s\n", level, data->pMessage);
+        fclose(file);
+    }
+    fprintf(stderr, "VKV: %s: %s\n", level, data->pMessage);
+    return VK_FALSE;
+}
+
+static br_boolean video_create_debug_messenger(br_vk_video* video) {
+    PFN_vkCreateDebugUtilsMessengerEXT create_messenger;
+    VkDebugUtilsMessengerCreateInfoEXT info;
+
+    create_messenger = (PFN_vkCreateDebugUtilsMessengerEXT)gpa(video->instance, "vkCreateDebugUtilsMessengerEXT");
+    if (create_messenger == NULL)
+        return BR_FALSE;
+
+    BrMemSet(&info, 0, sizeof(info));
+    info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+    info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT
+        | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT
+        | VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT;
+    info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT
+        | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
+        | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    info.pfnUserCallback = video_debug_callback;
+
+    return create_messenger(video->instance, &info, NULL, &video_debug_messenger) == VK_SUCCESS ? BR_TRUE : BR_FALSE;
+}
+
 static br_error video_create_instance(br_vk_video* video) {
     const char* extensions[VKREND_MAX_INSTANCE_EXTENSIONS];
+    const char* layers[1];
     br_uint_32 extension_count = 0;
     br_uint_32 i;
     VkApplicationInfo app_info;
@@ -359,7 +408,8 @@ static br_error video_create_instance(br_vk_video* video) {
     VkExtensionProperties* available = NULL;
     br_uint_32 available_count = 0;
     br_boolean portability = BR_FALSE;
-
+    br_boolean validation = BR_FALSE;
+    br_boolean debug_utils = BR_FALSE;
     pCreateInstance = (PFN_vkCreateInstance)gpa(NULL, "vkCreateInstance");
     pEnumerateInstanceExtensionProperties = (PFN_vkEnumerateInstanceExtensionProperties)gpa(NULL, "vkEnumerateInstanceExtensionProperties");
     if (pCreateInstance == NULL || pEnumerateInstanceExtensionProperties == NULL) {
@@ -379,10 +429,10 @@ static br_error video_create_instance(br_vk_video* video) {
         if (available != NULL
             && pEnumerateInstanceExtensionProperties(NULL, &available_count, available) == VK_SUCCESS) {
             for (i = 0; i < available_count; i++) {
-                if (strcmp(available[i].extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0) {
+                if (strcmp(available[i].extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0)
                     portability = BR_TRUE;
-                    break;
-                }
+                else if (strcmp(available[i].extensionName, VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == 0)
+                    debug_utils = BR_TRUE;
             }
         }
         BrMemFree(available);
@@ -390,6 +440,38 @@ static br_error video_create_instance(br_vk_video* video) {
 
     if (portability && extension_count < VKREND_MAX_INSTANCE_EXTENSIONS)
         extensions[extension_count++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+
+    if (getenv("VKREND_VALIDATION") != NULL) {
+        PFN_vkEnumerateInstanceLayerProperties enumerate_layers =
+            (PFN_vkEnumerateInstanceLayerProperties)gpa(NULL, "vkEnumerateInstanceLayerProperties");
+
+        if (enumerate_layers != NULL) {
+            br_uint_32 layer_count = 0;
+
+            if (enumerate_layers(&layer_count, NULL) == VK_SUCCESS && layer_count > 0) {
+                VkLayerProperties* layer_properties =
+                    BrMemAllocate(sizeof(VkLayerProperties) * layer_count, BR_MEMORY_APPLICATION);
+
+                if (layer_properties != NULL
+                    && enumerate_layers(&layer_count, layer_properties) == VK_SUCCESS) {
+                    for (i = 0; i < layer_count; i++) {
+                        if (strcmp(layer_properties[i].layerName, "VK_LAYER_KHRONOS_validation") == 0) {
+                            validation = BR_TRUE;
+                            break;
+                        }
+                    }
+                }
+                if (layer_properties != NULL)
+                    BrMemFree(layer_properties);
+            }
+        }
+    }
+
+    if (debug_utils && extension_count < VKREND_MAX_INSTANCE_EXTENSIONS)
+        extensions[extension_count++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+
+    if (validation)
+        BrLogPrintf("VKREND: validation layers enabled\n");
 
     BrMemSet(&app_info, 0, sizeof(app_info));
     app_info.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -402,6 +484,11 @@ static br_error video_create_instance(br_vk_video* video) {
     create_info.pApplicationInfo = &app_info;
     create_info.enabledExtensionCount = extension_count;
     create_info.ppEnabledExtensionNames = extension_count > 0 ? extensions : NULL;
+    if (validation) {
+        layers[0] = "VK_LAYER_KHRONOS_validation";
+        create_info.enabledLayerCount = 1;
+        create_info.ppEnabledLayerNames = layers;
+    }
     if (portability)
         create_info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 
@@ -410,6 +497,8 @@ static br_error video_create_instance(br_vk_video* video) {
         return video_fail("vkCreateInstance", result);
     if (video_load_instance_functions(video) != BRE_OK)
         return BRE_FAIL;
+    if (validation && debug_utils && !video_create_debug_messenger(video))
+        BrLogPrintf("VKREND: validation messenger unavailable\n");
     if (video_host_failed(video->callbacks.create_surface(video->callbacks.window, video->instance, (void**)&video->surface))) {
         BrFailure("VKREND: host could not create a Vulkan surface");
         return BRE_FAIL;
@@ -1544,11 +1633,16 @@ br_error VIDEOVkCreate(br_vk_video* video, const br_device_vkrend_callback_procs
     }
 
     video->active = BR_TRUE;
+    video->generation = ++video_generation_counter;
 
     BrLogPrintf("VKREND: Vulkan swapchain %dx%d, format %d, %d images\n", (int)video->extent.width,
         (int)video->extent.height, (int)video->format, (int)video->image_count);
 
     return BRE_OK;
+}
+
+PFN_vkGetInstanceProcAddr VIDEOVkGetInstanceProcAddr(void) {
+    return gpa;
 }
 
 void VIDEOVkDestroy(br_vk_video* video) {

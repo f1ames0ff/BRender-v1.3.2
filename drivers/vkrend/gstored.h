@@ -50,6 +50,8 @@ typedef struct br_geometry_stored {
     br_uint_32 total_faces;
     br_uint_32 total_vertices;
 
+    struct vk_gpu_geometry* gpu;
+
 } br_geometry_stored;
 
 #endif

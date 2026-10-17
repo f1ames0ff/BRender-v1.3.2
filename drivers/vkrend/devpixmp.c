@@ -63,6 +63,7 @@ static struct br_tv_template_entry devicePixelmapTemplateEntries[] = {
     { BRT(OUTPUT_FACILITY_O), F(output_facility), BRTV_QUERY | BRTV_ALL, BRTV_CONV_COPY, 0 },
     { BRT(FACILITY_O), F(output_facility), BRTV_QUERY, BRTV_CONV_COPY, 0 },
     { BRT(IDENTIFIER_CSTR), F(pm_identifier), BRTV_QUERY | BRTV_ALL, BRTV_CONV_COPY, 0 },
+    { BRT(CLUT_O), F(clut), BRTV_QUERY | BRTV_ALL, BRTV_CONV_COPY, 0 },
     { DEV(VKREND_CALLBACKS_P), 0, BRTV_QUERY | BRTV_ALL, BRTV_CONV_DIRECT, 0 },
 };
 
@@ -73,6 +74,7 @@ static struct br_tv_template_entry devicePixelmapFrontTemplateEntries[] = {
     { BRT(OUTPUT_FACILITY_O), F(output_facility), BRTV_QUERY | BRTV_ALL, BRTV_CONV_COPY, 0 },
     { BRT(FACILITY_O), F(output_facility), BRTV_QUERY, BRTV_CONV_COPY, 0 },
     { BRT(IDENTIFIER_CSTR), F(pm_identifier), BRTV_QUERY | BRTV_ALL, BRTV_CONV_COPY, 0 },
+    { BRT(CLUT_O), F(clut), BRTV_QUERY | BRTV_ALL, BRTV_CONV_COPY, 0 },
     { DEV(VKREND_CALLBACKS_P), 0, BRTV_QUERY | BRTV_ALL, BRTV_CONV_DIRECT, 0 },
 };
 #undef F
@@ -159,6 +161,7 @@ br_device_pixelmap* DevicePixelmapVkAllocateFront(br_device* dev, br_output_faci
     self->dispatch = &devicePixelmapFrontDispatch;
     self->device = dev;
     self->output_facility = outfcty;
+    self->clut = dev->clut;
     self->use_type = BRT_NONE;
     self->screen = self;
     self->callbacks = *pt.callbacks;
@@ -187,12 +190,15 @@ static void BR_CMETHOD_DECL(br_device_pixelmap_vk, free)(br_object* _self) {
     br_device_pixelmap* self = (br_device_pixelmap*)_self;
 
     if (self->sub_pixelmap) {
+        GpuVkTargetDestroy(&self->gpu_target);
         BrResFreeNoCallback(self);
         return;
     }
 
     if (self->output_facility != NULL)
         ObjectContainerRemove(self->output_facility, (br_object*)self);
+
+    GpuVkTargetDestroy(&self->gpu_target);
 
     VIDEOVkDestroy(&self->video);
 
@@ -245,6 +251,8 @@ static struct br_tv_template* BR_CMETHOD_DECL(br_device_pixelmap_vk, templateQue
 static br_error BR_CMETHOD_DECL(br_device_pixelmap_vk, resize)(br_device_pixelmap* self, br_int_32 width, br_int_32 height) {
     if (width <= 0 || height <= 0)
         return BRE_UNSUPPORTED;
+
+    GpuVkTargetDestroy(&self->gpu_target);
 
     if (DevicePixelmapVkResizeShadow(self, width, height) != BRE_OK)
         return BRE_FAIL;
@@ -329,6 +337,7 @@ static br_error BR_CMETHOD_DECL(br_device_pixelmap_vk, match)(br_device_pixelmap
     pm->dispatch = &devicePixelmapDispatch;
     pm->device = self->device;
     pm->output_facility = self->output_facility;
+    pm->clut = self->device->clut;
     pm->use_type = mt.use_type;
     pm->screen = self->screen;
 
@@ -383,6 +392,7 @@ static br_error BR_CMETHOD_DECL(br_device_pixelmap_vk, allocateSub)(br_device_pi
 
     pm->sub_pixelmap = BR_TRUE;
     pm->parent_height = self->pm_height;
+    pm->gpu_target = NULL;
 
     if (out.w != self->pm_width)
         pm->pm_flags &= ~BR_PMF_LINEAR;

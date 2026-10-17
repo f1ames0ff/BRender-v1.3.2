@@ -52,9 +52,13 @@ static void BR_CMETHOD_DECL(br_renderer_vk, sceneBegin)(br_renderer* self) {
     self->scene_stats.vertices_rendered_count = 0;
 
     self->has_begun = 1;
+
+    GpuVkSceneBeginRenderer(self);
 }
 
 static void BR_CMETHOD_DECL(br_renderer_vk, sceneEnd)(br_renderer* self) {
+    GpuVkSceneEndRenderer(self);
+
     self->has_begun = 0;
 }
 
@@ -149,10 +153,12 @@ static br_error BR_CMETHOD_DECL(br_renderer_vk, bufferStoredNew)(br_renderer* se
 static br_error BR_CMETHOD_DECL(br_renderer_vk, bufferStoredAvail)(br_renderer* self, br_int_32* space, br_token use,
     br_token_value* tv) {
     (void)self;
-    (void)space;
     (void)use;
     (void)tv;
-    return BRE_FAIL;
+
+    *space = 0;
+
+    return BRE_OK;
 }
 
 static br_error BR_CMETHOD_DECL(br_renderer_vk, partSet)(br_renderer* self, br_token part, br_int_32 index, br_token t,
