@@ -678,7 +678,8 @@ static void BufferTextureAbandon(struct br_buffer_stored* self) {
 
 static void BufferTextureRelease(struct br_buffer_stored* self) {
     if (sbuffer_loaded && self->texture_device != VK_NULL_HANDLE && self->video != NULL && self->video->active
-        && self->video->device == self->texture_device) {
+        && self->video->device == self->texture_device
+        && self->built_generation == self->video->generation) {
         if (self->staging_mapped != NULL) {
             sbuffer_gpu.UnmapMemory(self->texture_device, self->staging_memory);
             self->staging_mapped = NULL;

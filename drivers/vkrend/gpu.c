@@ -10,6 +10,7 @@
 #define VKREND_GPU_VERTEX_FLOATS 9
 #define VKREND_GPU_TEXTURE_SET_CAPACITY 512
 #define VKREND_GPU_RETIRED_CAPACITY 1024
+#define VKREND_MAIN_TARGET_MIN_DRAWS 8
 
 #ifndef VKREND_SBUFFER_TEXTURE_API
 
@@ -2077,7 +2078,8 @@ void GpuVkSceneEndRenderer(br_renderer* renderer) {
         br_vk_video* video = target->video;
 
         if (video->present_target == NULL
-            || target->frame_draw_count > video->present_target->frame_draw_count) {
+            || (video->present_target->frame_draw_count < VKREND_MAIN_TARGET_MIN_DRAWS
+                && target->frame_draw_count > video->present_target->frame_draw_count)) {
             video->present_target = target;
         }
 
