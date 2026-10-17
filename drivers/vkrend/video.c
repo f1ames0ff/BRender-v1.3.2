@@ -1551,6 +1551,13 @@ static br_error video_recover_device_lost(br_vk_video* video) {
     return BRE_OK;
 }
 
+br_error VIDEOVkDeviceLost(br_vk_video* video) {
+    if (video == NULL)
+        return BRE_FAIL;
+
+    return video_recover_device_lost(video);
+}
+
 static br_error video_present_frame(br_vk_video* video, const void* pixels, br_int_32 width, br_int_32 height,
     br_int_32 row_bytes) {
     VkResult result;

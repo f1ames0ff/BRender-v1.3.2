@@ -48,6 +48,7 @@ typedef struct br_buffer_stored {
 
     br_uint_32 revision;
     br_uint_32 built_revision;
+    br_uint_32 built_generation;
     br_pixelmap* built_source;
     br_pixelmap* built_palette;
 

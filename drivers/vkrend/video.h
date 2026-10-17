@@ -85,6 +85,8 @@ typedef struct br_vk_video {
 
 PFN_vkGetInstanceProcAddr VIDEOVkGetInstanceProcAddr(void);
 
+br_error VIDEOVkDeviceLost(br_vk_video* video);
+
 br_boolean VIDEOVkOverlayEnsure(br_vk_video* video, br_uint_32 width, br_uint_32 height);
 
 void VIDEOVkOverlayUpload(br_vk_video* video, VkCommandBuffer command_buffer, const br_uint_8* pixels,

@@ -175,6 +175,7 @@ struct vk_gpu_target {
     VkImageLayout colour_layout;
     br_uint_32 frame_epoch;
     br_uint_32 overlay_epoch;
+    br_uint_32 frame_draw_count;
 
     vk_gpu_texture_set texture_sets[VKREND_GPU_TEXTURE_SET_CAPACITY];
     br_uint_32 texture_set_count;
@@ -221,6 +222,16 @@ static void GpuVkDisable(const char* stage) {
     gpu_disabled = BR_TRUE;
     BrLogPrintf("VKREND: gpu path failed at %s, falling back to record-only\n", (char*)stage);
     GpuVkLogMarker("VKREND: gpu path failed at %s, falling back to record-only", stage);
+}
+
+static br_boolean GpuVkHandleDeviceLost(br_vk_video* video, const char* stage, VkResult result) {
+    GpuVkRecordResult(stage, result);
+
+    if (result == VK_ERROR_DEVICE_LOST && VIDEOVkDeviceLost(video) == BRE_OK)
+        return BR_TRUE;
+
+    GpuVkDisable(stage);
+    return BR_FALSE;
 }
 
 static br_boolean GpuVkLoadFunctions(VkInstance instance) {
@@ -1712,13 +1723,13 @@ static br_boolean GpuVkBeginScene(vk_gpu_target* target) {
         if (video->scene_fence_pending) {
             result = gpu.WaitForFences(video->device, 1, &video->scene_fence, VK_TRUE, UINT64_MAX);
             if (result != VK_SUCCESS) {
-                GpuVkRecordResult("scene fence wait", result);
+                GpuVkHandleDeviceLost(video, "scene fence wait", result);
                 return BR_FALSE;
             }
 
             result = gpu.ResetFences(video->device, 1, &video->scene_fence);
             if (result != VK_SUCCESS) {
-                GpuVkRecordResult("scene fence reset", result);
+                GpuVkHandleDeviceLost(video, "scene fence reset", result);
                 return BR_FALSE;
             }
 
@@ -1727,7 +1738,7 @@ static br_boolean GpuVkBeginScene(vk_gpu_target* target) {
 
         result = gpu.WaitForFences(video->device, 1, &video->fence, VK_TRUE, UINT64_MAX);
         if (result != VK_SUCCESS) {
-            GpuVkRecordResult("present fence wait", result);
+            GpuVkHandleDeviceLost(video, "present fence wait", result);
             return BR_FALSE;
         }
 
@@ -1736,7 +1747,7 @@ static br_boolean GpuVkBeginScene(vk_gpu_target* target) {
 
         result = gpu.ResetCommandBuffer(command_buffer, 0);
         if (result != VK_SUCCESS) {
-            GpuVkRecordResult("scene command buffer reset", result);
+            GpuVkHandleDeviceLost(video, "scene command buffer reset", result);
             return BR_FALSE;
         }
 
@@ -1748,18 +1759,20 @@ static br_boolean GpuVkBeginScene(vk_gpu_target* target) {
 
         result = gpu.BeginCommandBuffer(command_buffer, &begin_info);
         if (result != VK_SUCCESS) {
-            GpuVkRecordResult("scene command buffer begin", result);
+            GpuVkHandleDeviceLost(video, "scene command buffer begin", result);
             return BR_FALSE;
         }
 
         video->scene_recording = BR_TRUE;
         video->frame_epoch++;
         video->frame_has_scene = BR_FALSE;
+        video->present_target = NULL;
     }
 
     if (target->frame_epoch != video->frame_epoch) {
         target->frame_epoch = video->frame_epoch;
         target->ubo_slot = 0;
+        target->frame_draw_count = 0;
         GpuVkClearTargetColour(target, command_buffer);
     }
 
@@ -1839,8 +1852,7 @@ void GpuVkFrameEnd(br_vk_video* video) {
 
     result = gpu.EndCommandBuffer(video->scene_command_buffer);
     if (result != VK_SUCCESS) {
-        GpuVkRecordResult("scene command buffer end", result);
-        GpuVkDisable("frame end");
+        GpuVkHandleDeviceLost(video, "scene command buffer end", result);
         return;
     }
 
@@ -1851,8 +1863,7 @@ void GpuVkFrameEnd(br_vk_video* video) {
 
     result = gpu.QueueSubmit(video->queue, 1, &submit_info, video->scene_fence);
     if (result != VK_SUCCESS) {
-        GpuVkRecordResult("scene queue submit", result);
-        GpuVkDisable("frame submit");
+        GpuVkHandleDeviceLost(video, "scene queue submit", result);
         return;
     }
 
@@ -1860,15 +1871,13 @@ void GpuVkFrameEnd(br_vk_video* video) {
 
     result = gpu.WaitForFences(video->device, 1, &video->scene_fence, VK_TRUE, UINT64_MAX);
     if (result != VK_SUCCESS) {
-        GpuVkRecordResult("scene fence wait", result);
-        GpuVkDisable("frame fence wait");
+        GpuVkHandleDeviceLost(video, "scene fence wait", result);
         return;
     }
 
     result = gpu.ResetFences(video->device, 1, &video->scene_fence);
     if (result != VK_SUCCESS) {
-        GpuVkRecordResult("scene fence reset", result);
-        GpuVkDisable("frame fence reset");
+        GpuVkHandleDeviceLost(video, "scene fence reset", result);
         return;
     }
 
@@ -2031,10 +2040,15 @@ void GpuVkSceneBeginRenderer(br_renderer* renderer) {
         }
     }
 
-    if (!GpuVkBeginScene(target)) {
-        GpuVkTargetDestroy(&colour->gpu_target);
-        GpuVkDisable("scene begin");
-        return;
+    {
+        br_uint_32 generation = video->generation;
+
+        if (!GpuVkBeginScene(target)) {
+            GpuVkTargetDestroy(&colour->gpu_target);
+            if (video->generation == generation)
+                GpuVkDisable("scene begin");
+            return;
+        }
     }
 
     renderer->gpu_scene = target;
@@ -2059,9 +2073,15 @@ void GpuVkSceneEndRenderer(br_renderer* renderer) {
         return;
     }
 
-    if (target->video != NULL && !target->video->frame_has_scene) {
-        target->video->present_target = target;
-        target->video->frame_has_scene = BR_TRUE;
+    if (target->video != NULL) {
+        br_vk_video* video = target->video;
+
+        if (video->present_target == NULL
+            || target->frame_draw_count > video->present_target->frame_draw_count) {
+            video->present_target = target;
+        }
+
+        video->frame_has_scene = BR_TRUE;
     }
 }
 
@@ -2283,6 +2303,8 @@ static void GpuVkDrawGeometry(vk_gpu_target* target, br_renderer* renderer, vk_g
 
         gpu.CmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, target->pipeline_layout, 0, 1,
             &descriptor_set, 1, &ubo_offset);
+
+        target->frame_draw_count++;
 
         gpu.CmdDrawIndexed(command_buffer, geometry->ranges[group].index_count, 1,
             geometry->ranges[group].first_index, 0, 0);

@@ -673,6 +673,7 @@ static void BufferTextureAbandon(struct br_buffer_stored* self) {
     self->staging_memory = VK_NULL_HANDLE;
     self->staging_mapped = NULL;
     self->staging_bytes = 0;
+    self->built_generation = 0;
 }
 
 static void BufferTextureRelease(struct br_buffer_stored* self) {
@@ -781,6 +782,7 @@ static br_boolean BufferTextureBuild(struct br_buffer_stored* self, br_vk_video*
     self->texture.generation = self->texture.generation + 1;
     self->texture_device = video->device;
     self->built_revision = self->revision;
+    self->built_generation = video->generation;
     self->built_source = source;
     self->built_palette = palette;
     self->built_clut = clut;
@@ -820,13 +822,15 @@ br_boolean BufferStoredVkGetTexture(struct br_buffer_stored* stored, br_vk_video
     palette = BufferTexturePalette(source);
     clut = BufferTextureSourceClut(stored, source);
 
-    if (stored->texture_device != VK_NULL_HANDLE && stored->texture_device != video->device) {
+    if (stored->texture_device != VK_NULL_HANDLE
+        && (stored->texture_device != video->device || stored->built_generation != video->generation)) {
         BufferTextureAbandon(stored);
         stored->unavailable = BR_FALSE;
     }
 
     if (!stored->unavailable
         && (stored->texture.image == VK_NULL_HANDLE || stored->built_revision != stored->revision
+            || stored->built_generation != video->generation
             || stored->built_source != source || stored->built_palette != palette || stored->built_clut != clut
             || (clut != NULL && stored->built_clut_revision != clut->revision))) {
         if (!BufferTextureLoadFunctions(video->instance))
@@ -891,6 +895,7 @@ struct br_buffer_stored* BufferStoredVkAllocate(br_renderer* renderer, br_token 
     self->staging_bytes = 0;
     self->revision = 1;
     self->built_revision = 0;
+    self->built_generation = 0;
     self->built_source = NULL;
     self->built_palette = NULL;
     self->clut_queried = NULL;
