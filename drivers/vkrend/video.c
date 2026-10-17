@@ -1525,10 +1525,22 @@ static br_error video_recover_device_lost(br_vk_video* video) {
     br_int_32 height = video->window_height;
     br_int_32 attempts = video->recovery_attempted;
 
+    if (video->recovery_exhausted)
+        return BRE_FAIL;
+
+    if (video->present_serial != 0 && video->recovery_serial == video->present_serial)
+        return BRE_FAIL;
+
     if (attempts >= 8) {
         BrLogPrintf("VKREND: device lost recovery budget exhausted\n");
+        video->recovery_exhausted = BR_TRUE;
+        video->recovery_cooldown = 0;
+        video->present_target = NULL;
+        video->frame_has_scene = BR_FALSE;
         return BRE_FAIL;
     }
+
+    video->recovery_serial = video->present_serial;
 
     BrLogPrintf("VKREND: Vulkan device lost, reinitialising\n");
 
@@ -1573,6 +1585,16 @@ static br_error video_present_frame(br_vk_video* video, const void* pixels, br_i
 
     if (video->window_width <= 0 || video->window_height <= 0)
         return BRE_OK;
+
+    video->present_serial++;
+
+    if (video->recovery_exhausted) {
+        if (++video->recovery_cooldown >= 600) {
+            video->recovery_cooldown = 0;
+            video->recovery_exhausted = BR_FALSE;
+            video->recovery_attempted = 0;
+        }
+    }
 
     if (!VIDEOVkOverlayEnsure(video, (br_uint_32)width, (br_uint_32)height))
         return BRE_FAIL;
@@ -1737,6 +1759,7 @@ static br_error video_present_frame(br_vk_video* video, const void* pixels, br_i
     if (video->recovery_attempted > 0) {
         if (++video->recovery_stable_frames >= 600) {
             video->recovery_attempted = 0;
+            video->recovery_exhausted = BR_FALSE;
             video->recovery_stable_frames = 0;
         }
     } else {

@@ -823,8 +823,7 @@ br_boolean BufferStoredVkGetTexture(struct br_buffer_stored* stored, br_vk_video
     palette = BufferTexturePalette(source);
     clut = BufferTextureSourceClut(stored, source);
 
-    if (stored->texture_device != VK_NULL_HANDLE
-        && (stored->texture_device != video->device || stored->built_generation != video->generation)) {
+    if (stored->built_generation != video->generation) {
         BufferTextureAbandon(stored);
         stored->unavailable = BR_FALSE;
     }
