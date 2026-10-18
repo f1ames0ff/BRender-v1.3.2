@@ -801,13 +801,30 @@ static br_error video_create_swapchain(br_vk_video* video, VkSwapchainKHR old_sw
         if (present_modes != NULL) {
             if (pGetPhysicalDeviceSurfacePresentModesKHR(video->physical_device, video->surface, &present_mode_count,
                     present_modes) == VK_SUCCESS) {
+                br_boolean uncapped = getenv("VKREND_UNCAPPED") != NULL;
+                br_boolean immediate = BR_FALSE;
+                br_boolean mailbox = BR_FALSE;
+
                 present_mode = present_modes[0];
                 for (i = 0; i < present_mode_count; i++) {
-                    if (present_modes[i] == VK_PRESENT_MODE_FIFO_KHR) {
-                        present_mode = VK_PRESENT_MODE_FIFO_KHR;
-                        break;
+                    if (present_modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR)
+                        immediate = BR_TRUE;
+                    if (present_modes[i] == VK_PRESENT_MODE_MAILBOX_KHR)
+                        mailbox = BR_TRUE;
+                }
+
+                if (uncapped && (immediate || mailbox)) {
+                    present_mode = immediate ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_MAILBOX_KHR;
+                } else {
+                    for (i = 0; i < present_mode_count; i++) {
+                        if (present_modes[i] == VK_PRESENT_MODE_FIFO_KHR) {
+                            present_mode = VK_PRESENT_MODE_FIFO_KHR;
+                            break;
+                        }
                     }
                 }
+                BrLogPrintf("VKREND: present mode %d (uncapped=%d, immediate=%d, mailbox=%d)\n",
+                    (int)present_mode, uncapped, immediate, mailbox);
             }
             BrMemFree(present_modes);
         }

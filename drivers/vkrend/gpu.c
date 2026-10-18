@@ -9,7 +9,7 @@
 #endif
 
 #define VKREND_GPU_UBO_SLOTS 8192
-#define VKREND_GPU_UBO_STRIDE 256
+#define VKREND_GPU_UBO_STRIDE 192
 #define VKREND_GPU_UBO_RANGE 192
 #define VKREND_GPU_VERTEX_STRIDE 36
 #define VKREND_GPU_VERTEX_FLOATS 9
@@ -70,6 +70,7 @@ typedef struct vk_gpu_functions {
     PFN_vkCmdEndRenderPass CmdEndRenderPass;
     PFN_vkCmdBindPipeline CmdBindPipeline;
     PFN_vkCmdBindDescriptorSets CmdBindDescriptorSets;
+    PFN_vkCmdPushConstants CmdPushConstants;
     PFN_vkCmdSetViewport CmdSetViewport;
     PFN_vkCmdSetScissor CmdSetScissor;
     PFN_vkCmdClearColorImage CmdClearColorImage;
@@ -361,6 +362,7 @@ static br_boolean GpuVkLoadFunctions(VkInstance instance) {
     VKREND_LOAD(CmdEndRenderPass);
     VKREND_LOAD(CmdBindPipeline);
     VKREND_LOAD(CmdBindDescriptorSets);
+    VKREND_LOAD(CmdPushConstants);
     VKREND_LOAD(CmdSetViewport);
     VKREND_LOAD(CmdSetScissor);
     VKREND_LOAD(CmdClearColorImage);
@@ -688,7 +690,7 @@ static void GpuVkWriteSetDescriptors(vk_gpu_target* target, VkDescriptorSet set,
     BrMemSet(&buffer_info, 0, sizeof(buffer_info));
     buffer_info.buffer = target->ubo_buffer;
     buffer_info.offset = 0;
-    buffer_info.range = VKREND_GPU_UBO_RANGE;
+    buffer_info.range = VK_WHOLE_SIZE;
 
     BrMemSet(image_info, 0, sizeof(image_info));
     for (i = 0; i < VKREND_GPU_TEXTURE_SET_CAPACITY; i++) {
@@ -702,7 +704,7 @@ static void GpuVkWriteSetDescriptors(vk_gpu_target* target, VkDescriptorSet set,
     writes[0].dstSet = set;
     writes[0].dstBinding = 0;
     writes[0].descriptorCount = 1;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     writes[0].pBufferInfo = &buffer_info;
     writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     writes[1].dstSet = set;
@@ -749,7 +751,7 @@ static br_boolean GpuVkCreateDescriptors(vk_gpu_target* target) {
 
     BrMemSet(bindings, 0, sizeof(bindings));
     bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[0].descriptorCount = 1;
     bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     bindings[1].binding = 1;
@@ -766,7 +768,7 @@ static br_boolean GpuVkCreateDescriptors(vk_gpu_target* target) {
         return BR_FALSE;
 
     BrMemSet(pool_sizes, 0, sizeof(pool_sizes));
-    pool_sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    pool_sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     pool_sizes[0].descriptorCount = 1;
     pool_sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     pool_sizes[1].descriptorCount = VKREND_GPU_TEXTURE_SET_CAPACITY;
@@ -814,6 +816,7 @@ static br_boolean GpuVkCreatePipeline(vk_gpu_target* target) {
     VkDynamicState dynamic_states[2];
     VkPipelineDynamicStateCreateInfo dynamic;
     VkPipelineLayoutCreateInfo layout_info;
+    VkPushConstantRange push_constant;
     VkGraphicsPipelineCreateInfo pipeline_info;
     VkResult result;
 
@@ -909,10 +912,17 @@ static br_boolean GpuVkCreatePipeline(vk_gpu_target* target) {
     blend.attachmentCount = 1;
     blend.pAttachments = &blend_attachment;
 
+    BrMemSet(&push_constant, 0, sizeof(push_constant));
+    push_constant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    push_constant.offset = 0;
+    push_constant.size = sizeof(br_uint_32);
+
     BrMemSet(&layout_info, 0, sizeof(layout_info));
     layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layout_info.setLayoutCount = 1;
     layout_info.pSetLayouts = &target->set_layout;
+    layout_info.pushConstantRangeCount = 1;
+    layout_info.pPushConstantRanges = &push_constant;
 
     result = gpu.CreatePipelineLayout(device, &layout_info, NULL, &target->pipeline_layout);
     if (result != VK_SUCCESS)
@@ -1384,7 +1394,6 @@ void GpuVkTargetDestroy(vk_gpu_target** ptarget) {
 
 static br_boolean GpuVkTargetInit(vk_gpu_target* target) {
     br_vk_video* video = target->video;
-    VkPhysicalDeviceProperties properties;
     VkFormatProperties format_properties;
     VkFormatFeatureFlags colour_required = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
         | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
@@ -1417,13 +1426,10 @@ static br_boolean GpuVkTargetInit(vk_gpu_target* target) {
     if (!GpuVkCreateWhiteTexture(target))
         return BR_FALSE;
 
-    gpu.GetPhysicalDeviceProperties(video->physical_device, &properties);
     target->ubo_stride = VKREND_GPU_UBO_STRIDE;
-    if (properties.limits.minUniformBufferOffsetAlignment > target->ubo_stride)
-        target->ubo_stride = properties.limits.minUniformBufferOffsetAlignment;
 
     ubo_size = target->ubo_stride * VKREND_GPU_UBO_SLOTS;
-    if (!GpuVkCreateBuffer(video, ubo_size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &target->ubo_buffer,
+    if (!GpuVkCreateBuffer(video, ubo_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &target->ubo_buffer,
             &target->ubo_memory, (void**)&target->ubo_mapped))
         return BR_FALSE;
 
@@ -1981,6 +1987,8 @@ static br_boolean GpuVkBeginScene(vk_gpu_target* target) {
     }
 
     gpu.CmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, target->pipeline);
+    gpu.CmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, target->pipeline_layout, 0, 1,
+        &target->descriptor_set, 0, NULL);
 
     target->frame_sequence++;
     target->in_scene = BR_TRUE;
@@ -2489,8 +2497,6 @@ static void GpuVkDrawGeometry(vk_gpu_target* target, br_renderer* renderer, vk_g
 
     for (group = 0; group < geometry->ngroups; group++) {
         vk_gpu_material material;
-        VkDescriptorSet descriptor_set;
-        br_uint_32 ubo_offset;
         br_uint_32 slot;
         double material_start;
 
@@ -2504,16 +2510,14 @@ static void GpuVkDrawGeometry(vk_gpu_target* target, br_renderer* renderer, vk_g
         BrMemSet(&material, 0, sizeof(material));
         GpuVkMaterialResolve(model, group, default_state, &material);
         material_start = gpu_now_us();
-        descriptor_set = GpuVkMaterialDescriptor(target, &material);
+        GpuVkMaterialDescriptor(target, &material);
         gpu_material_us += gpu_now_us() - material_start;
         gpu_material_calls++;
 
         GpuVkWriteUbo(target, slot, renderer, &material);
-        ubo_offset = (br_uint_32)((VkDeviceSize)slot * target->ubo_stride);
 
-
-        gpu.CmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, target->pipeline_layout, 0, 1,
-            &descriptor_set, 1, &ubo_offset);
+        gpu.CmdPushConstants(command_buffer, target->pipeline_layout,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(slot), &slot);
 
         target->frame_draw_count++;
 
