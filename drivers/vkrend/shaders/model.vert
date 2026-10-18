@@ -7,25 +7,17 @@ layout(location = 2) in vec4 aColour;
 layout(location = 0) out vec2 vUV;
 layout(location = 1) out vec4 vColour;
 
-struct DrawState {
+layout(set = 0, binding = 0, std140) uniform vk_model_state {
     mat4 v2s;
     mat4 m2v;
     vec4 colour;
     vec4 params;
     vec4 map_row0;
     vec4 map_row1;
-};
-
-layout(set = 0, binding = 0, std430) buffer vk_model_state {
-    DrawState draws[];
-} data;
-
-layout(push_constant) uniform PushConstants {
-    uint draw_index;
-} pc;
+} model;
 
 void main() {
     vUV = aUV;
     vColour = aColour;
-    gl_Position = data.draws[pc.draw_index].v2s * data.draws[pc.draw_index].m2v * vec4(aPosition, 1.0);
+    gl_Position = model.v2s * model.m2v * vec4(aPosition, 1.0);
 }

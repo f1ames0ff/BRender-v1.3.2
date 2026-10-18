@@ -3,13 +3,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
-#ifdef _WIN32
-#include <windows.h>
-#endif
 
 #define VKREND_GPU_UBO_SLOTS 8192
-#define VKREND_GPU_UBO_STRIDE 192
+#define VKREND_GPU_UBO_STRIDE 256
 #define VKREND_GPU_UBO_RANGE 192
 #define VKREND_GPU_VERTEX_STRIDE 36
 #define VKREND_GPU_VERTEX_FLOATS 9
@@ -70,7 +66,6 @@ typedef struct vk_gpu_functions {
     PFN_vkCmdEndRenderPass CmdEndRenderPass;
     PFN_vkCmdBindPipeline CmdBindPipeline;
     PFN_vkCmdBindDescriptorSets CmdBindDescriptorSets;
-    PFN_vkCmdPushConstants CmdPushConstants;
     PFN_vkCmdSetViewport CmdSetViewport;
     PFN_vkCmdSetScissor CmdSetScissor;
     PFN_vkCmdClearColorImage CmdClearColorImage;
@@ -105,7 +100,6 @@ typedef struct vk_gpu_material {
     br_boolean use_vertex_colour;
     br_uint_32 texture_width;
     br_uint_32 texture_height;
-    br_uint_32 texture_index;
     struct br_buffer_stored* colour_map;
     br_matrix23 map_transform;
 } vk_gpu_material;
@@ -117,18 +111,6 @@ typedef struct vk_gpu_texture_set {
     br_uint_32 used_frame;
     VkDescriptorSet set;
 } vk_gpu_texture_set;
-
-#define VKREND_GPU_MATERIAL_CACHE 4096
-
-typedef struct vk_gpu_material_cache {
-    struct br_buffer_stored* colour_map;
-    VkDescriptorSet set;
-    br_uint_32 width;
-    br_uint_32 height;
-    br_uint_32 texture_index;
-    br_uint_32 generation;
-    br_boolean textured;
-} vk_gpu_material_cache;
 
 typedef struct vk_gpu_retired_buffer {
     VkBuffer buffer;
@@ -203,9 +185,6 @@ struct vk_gpu_target {
     br_uint_32 texture_set_pool_count;
     br_uint_32 frame_sequence;
 
-    vk_gpu_material_cache material_cache[VKREND_GPU_MATERIAL_CACHE];
-    br_uint_32 material_cache_count;
-
     vk_gpu_retired_buffer retired[VKREND_GPU_RETIRED_CAPACITY];
     br_uint_32 retired_count;
 
@@ -227,53 +206,6 @@ static br_boolean gpu_draw_logged;
 static br_boolean gpu_texture_failure_logged;
 static br_boolean gpu_texture_capacity_logged;
 static br_boolean gpu_retired_full_logged;
-static clock_t gpu_prof_start;
-static clock_t gpu_prof_submit;
-static br_boolean gpu_env_ready;
-static br_boolean gpu_env_present_black;
-static br_boolean gpu_env_submit_per_pass;
-static br_boolean gpu_env_no_geometry;
-static br_boolean gpu_env_white_sets;
-static br_boolean gpu_env_white_view;
-static br_boolean gpu_env_single_set;
-static br_boolean gpu_env_prof;
-extern br_uint_32 sbuffer_build_count;
-
-static double gpu_material_us;
-static br_uint_32 gpu_material_calls;
-static br_uint_32 gpu_material_hits;
-static br_uint_32 gpu_material_misses;
-
-static double gpu_now_us(void) {
-#ifdef _WIN32
-    static LARGE_INTEGER frequency;
-    LARGE_INTEGER counter;
-
-    if (frequency.QuadPart == 0)
-        QueryPerformanceFrequency(&frequency);
-    QueryPerformanceCounter(&counter);
-    return (double)counter.QuadPart * 1000000.0 / (double)frequency.QuadPart;
-#else
-    struct timespec ts;
-
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec * 1000000.0 + (double)ts.tv_nsec / 1000.0;
-#endif
-}
-
-static void GpuVkEnvInit(void) {
-    if (gpu_env_ready)
-        return;
-
-    gpu_env_ready = BR_TRUE;
-    gpu_env_present_black = getenv("VKREND_PRESENT_BLACK") != NULL;
-    gpu_env_submit_per_pass = getenv("VKREND_SUBMIT_PER_PASS") != NULL;
-    gpu_env_no_geometry = getenv("VKREND_NO_GEOMETRY") != NULL;
-    gpu_env_white_sets = getenv("VKREND_WHITE_TEXTURE_SETS") != NULL;
-    gpu_env_white_view = getenv("VKREND_WHITE_TEXTURE_VIEW") != NULL;
-    gpu_env_single_set = getenv("VKREND_SINGLE_SET") != NULL;
-    gpu_env_prof = getenv("VKREND_PROF") != NULL;
-}
 static br_boolean gpu_frame_logged;
 
 static void GpuVkLogMarker(const char* format, const char* text);
@@ -362,7 +294,6 @@ static br_boolean GpuVkLoadFunctions(VkInstance instance) {
     VKREND_LOAD(CmdEndRenderPass);
     VKREND_LOAD(CmdBindPipeline);
     VKREND_LOAD(CmdBindDescriptorSets);
-    VKREND_LOAD(CmdPushConstants);
     VKREND_LOAD(CmdSetViewport);
     VKREND_LOAD(CmdSetScissor);
     VKREND_LOAD(CmdClearColorImage);
@@ -683,61 +614,34 @@ static br_boolean GpuVkCreateRenderPass(vk_gpu_target* target) {
 
 static void GpuVkWriteSetDescriptors(vk_gpu_target* target, VkDescriptorSet set, VkImageView view) {
     VkDescriptorBufferInfo buffer_info;
-    VkDescriptorImageInfo image_info[VKREND_GPU_TEXTURE_SET_CAPACITY];
+    VkDescriptorImageInfo image_info;
     VkWriteDescriptorSet writes[2];
-    br_uint_32 i;
 
     BrMemSet(&buffer_info, 0, sizeof(buffer_info));
     buffer_info.buffer = target->ubo_buffer;
     buffer_info.offset = 0;
-    buffer_info.range = VK_WHOLE_SIZE;
-
-    BrMemSet(image_info, 0, sizeof(image_info));
-    for (i = 0; i < VKREND_GPU_TEXTURE_SET_CAPACITY; i++) {
-        image_info[i].sampler = target->sampler;
-        image_info[i].imageView = view;
-        image_info[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    }
-
-    BrMemSet(writes, 0, sizeof(writes));
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = set;
-    writes[0].dstBinding = 0;
-    writes[0].descriptorCount = 1;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[0].pBufferInfo = &buffer_info;
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = set;
-    writes[1].dstBinding = 1;
-    writes[1].descriptorCount = VKREND_GPU_TEXTURE_SET_CAPACITY;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[1].pImageInfo = image_info;
-
-    gpu.UpdateDescriptorSets(target->video->device, 2, writes, 0, NULL);
-}
-
-static void GpuVkWriteTextureSlot(vk_gpu_target* target, br_uint_32 slot, VkImageView view) {
-    VkDescriptorImageInfo image_info;
-    VkWriteDescriptorSet write;
-
-    if (slot >= VKREND_GPU_TEXTURE_SET_CAPACITY)
-        return;
+    buffer_info.range = VKREND_GPU_UBO_RANGE;
 
     BrMemSet(&image_info, 0, sizeof(image_info));
     image_info.sampler = target->sampler;
     image_info.imageView = view;
     image_info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    BrMemSet(&write, 0, sizeof(write));
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = target->descriptor_set;
-    write.dstBinding = 1;
-    write.dstArrayElement = slot;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.pImageInfo = &image_info;
+    BrMemSet(writes, 0, sizeof(writes));
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = set;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    writes[0].pBufferInfo = &buffer_info;
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = set;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    writes[1].pImageInfo = &image_info;
 
-    gpu.UpdateDescriptorSets(target->video->device, 1, &write, 0, NULL);
+    gpu.UpdateDescriptorSets(target->video->device, 2, writes, 0, NULL);
 }
 
 static br_boolean GpuVkCreateDescriptors(vk_gpu_target* target) {
@@ -747,16 +651,17 @@ static br_boolean GpuVkCreateDescriptors(vk_gpu_target* target) {
     VkDescriptorPoolSize pool_sizes[2];
     VkDescriptorPoolCreateInfo pool_info;
     VkDescriptorSetAllocateInfo allocate_info;
+    br_uint_32 i;
     VkResult result;
 
     BrMemSet(bindings, 0, sizeof(bindings));
     bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     bindings[0].descriptorCount = 1;
     bindings[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     bindings[1].binding = 1;
     bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    bindings[1].descriptorCount = VKREND_GPU_TEXTURE_SET_CAPACITY;
+    bindings[1].descriptorCount = 1;
     bindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
 
     BrMemSet(&layout_info, 0, sizeof(layout_info));
@@ -768,14 +673,14 @@ static br_boolean GpuVkCreateDescriptors(vk_gpu_target* target) {
         return BR_FALSE;
 
     BrMemSet(pool_sizes, 0, sizeof(pool_sizes));
-    pool_sizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    pool_sizes[0].descriptorCount = 1;
+    pool_sizes[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    pool_sizes[0].descriptorCount = VKREND_GPU_TEXTURE_SET_CAPACITY + 1;
     pool_sizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    pool_sizes[1].descriptorCount = VKREND_GPU_TEXTURE_SET_CAPACITY;
+    pool_sizes[1].descriptorCount = VKREND_GPU_TEXTURE_SET_CAPACITY + 1;
 
     BrMemSet(&pool_info, 0, sizeof(pool_info));
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool_info.maxSets = 1;
+    pool_info.maxSets = VKREND_GPU_TEXTURE_SET_CAPACITY + 1;
     pool_info.poolSizeCount = 2;
     pool_info.pPoolSizes = pool_sizes;
 
@@ -788,11 +693,21 @@ static br_boolean GpuVkCreateDescriptors(vk_gpu_target* target) {
     allocate_info.descriptorSetCount = 1;
     allocate_info.pSetLayouts = &target->set_layout;
 
-    result = gpu.AllocateDescriptorSets(device, &allocate_info, &target->descriptor_set);
-    if (result != VK_SUCCESS)
-        return BR_FALSE;
+    for (i = 0; i < VKREND_GPU_TEXTURE_SET_CAPACITY + 1; i++) {
+        VkDescriptorSet set;
 
-    target->texture_set_pool_count = 0;
+        result = gpu.AllocateDescriptorSets(device, &allocate_info, &set);
+        if (result != VK_SUCCESS)
+            return BR_FALSE;
+
+        if (i == 0) {
+            target->descriptor_set = set;
+        } else {
+            target->texture_set_pool[i - 1] = set;
+        }
+    }
+
+    target->texture_set_pool_count = VKREND_GPU_TEXTURE_SET_CAPACITY;
     target->texture_set_count = 0;
 
     GpuVkWriteSetDescriptors(target, target->descriptor_set, target->white_view);
@@ -816,7 +731,6 @@ static br_boolean GpuVkCreatePipeline(vk_gpu_target* target) {
     VkDynamicState dynamic_states[2];
     VkPipelineDynamicStateCreateInfo dynamic;
     VkPipelineLayoutCreateInfo layout_info;
-    VkPushConstantRange push_constant;
     VkGraphicsPipelineCreateInfo pipeline_info;
     VkResult result;
 
@@ -912,17 +826,10 @@ static br_boolean GpuVkCreatePipeline(vk_gpu_target* target) {
     blend.attachmentCount = 1;
     blend.pAttachments = &blend_attachment;
 
-    BrMemSet(&push_constant, 0, sizeof(push_constant));
-    push_constant.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    push_constant.offset = 0;
-    push_constant.size = sizeof(br_uint_32);
-
     BrMemSet(&layout_info, 0, sizeof(layout_info));
     layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layout_info.setLayoutCount = 1;
     layout_info.pSetLayouts = &target->set_layout;
-    layout_info.pushConstantRangeCount = 1;
-    layout_info.pPushConstantRanges = &push_constant;
 
     result = gpu.CreatePipelineLayout(device, &layout_info, NULL, &target->pipeline_layout);
     if (result != VK_SUCCESS)
@@ -1394,6 +1301,7 @@ void GpuVkTargetDestroy(vk_gpu_target** ptarget) {
 
 static br_boolean GpuVkTargetInit(vk_gpu_target* target) {
     br_vk_video* video = target->video;
+    VkPhysicalDeviceProperties properties;
     VkFormatProperties format_properties;
     VkFormatFeatureFlags colour_required = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT
         | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
@@ -1426,10 +1334,13 @@ static br_boolean GpuVkTargetInit(vk_gpu_target* target) {
     if (!GpuVkCreateWhiteTexture(target))
         return BR_FALSE;
 
+    gpu.GetPhysicalDeviceProperties(video->physical_device, &properties);
     target->ubo_stride = VKREND_GPU_UBO_STRIDE;
+    if (properties.limits.minUniformBufferOffsetAlignment > target->ubo_stride)
+        target->ubo_stride = properties.limits.minUniformBufferOffsetAlignment;
 
     ubo_size = target->ubo_stride * VKREND_GPU_UBO_SLOTS;
-    if (!GpuVkCreateBuffer(video, ubo_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &target->ubo_buffer,
+    if (!GpuVkCreateBuffer(video, ubo_size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &target->ubo_buffer,
             &target->ubo_memory, (void**)&target->ubo_mapped))
         return BR_FALSE;
 
@@ -1492,7 +1403,7 @@ static void GpuVkWriteUbo(vk_gpu_target* target, br_uint_32 slot, br_renderer* r
     destination[40] = (float)material->map_transform.m[0][0];
     destination[41] = (float)material->map_transform.m[1][0];
     destination[42] = (float)material->map_transform.m[2][0];
-    destination[43] = (float)material->texture_index;
+    destination[43] = 0.0f;
     destination[44] = (float)material->map_transform.m[0][1];
     destination[45] = (float)material->map_transform.m[1][1];
     destination[46] = (float)material->map_transform.m[2][1];
@@ -1566,40 +1477,12 @@ static void GpuVkMaterialResolve(const struct v11model* model, br_uint_16 group_
     material->texture_height = 0;
 }
 
-static br_size_t GpuVkMaterialCacheIndex(const void* colour_map) {
-    br_size_t hash = (br_size_t)colour_map;
-
-    return ((hash >> 4) ^ (hash >> 13) ^ (hash >> 22)) & (VKREND_GPU_MATERIAL_CACHE - 1);
-}
-
-static void GpuVkCacheMaterial(vk_gpu_target* target, vk_gpu_material* material, br_uint_32 texture_index) {
-    br_size_t index = GpuVkMaterialCacheIndex(material->colour_map);
-    vk_gpu_material_cache* entry = &target->material_cache[index];
-
-    material->texture_index = texture_index;
-
-    if (entry->colour_map == NULL)
-        target->material_cache_count++;
-
-    entry->colour_map = material->colour_map;
-    entry->set = target->descriptor_set;
-    entry->width = material->texture_width;
-    entry->height = material->texture_height;
-    entry->texture_index = texture_index;
-    entry->generation = BufferStoredVkTextureGeneration(material->colour_map);
-    entry->textured = material->textured;
-}
-
 static VkDescriptorSet GpuVkMaterialDescriptor(vk_gpu_target* target, vk_gpu_material* material) {
     vk_buffer_texture texture;
     VkImageView sampled_view;
     br_uint_32 i;
-    br_uint_32 texture_generation;
-    br_int_32 reuse_index = -1;
 
-    GpuVkEnvInit();
-
-    if (gpu_env_white_sets) {
+    if (getenv("VKREND_WHITE_TEXTURE_SETS") != NULL) {
         material->textured = BR_FALSE;
         return target->descriptor_set;
     }
@@ -1607,103 +1490,71 @@ static VkDescriptorSet GpuVkMaterialDescriptor(vk_gpu_target* target, vk_gpu_mat
     if (material->colour_map == NULL)
         return target->descriptor_set;
 
-    if (gpu_env_single_set) {
-        material->textured = BR_TRUE;
-        material->texture_width = 1;
-        material->texture_height = 1;
-        return target->descriptor_set;
-    }
-
-    texture_generation = BufferStoredVkTextureGeneration(material->colour_map);
-    {
-        br_size_t cache_index = GpuVkMaterialCacheIndex(material->colour_map);
-        vk_gpu_material_cache* entry = &target->material_cache[cache_index];
-
-        if (entry->colour_map == material->colour_map && entry->generation == texture_generation) {
-            material->textured = entry->textured;
-            material->texture_width = entry->width;
-            material->texture_height = entry->height;
-            material->texture_index = entry->texture_index;
-            gpu_material_hits++;
-            return target->descriptor_set;
-        }
-    }
-
-    gpu_material_misses++;
     BrMemSet(&texture, 0, sizeof(texture));
     if (!BufferStoredVkGetTexture(material->colour_map, target->video, &texture) || texture.view == VK_NULL_HANDLE) {
         if (!gpu_texture_failure_logged) {
             gpu_texture_failure_logged = BR_TRUE;
             GpuVkLogMarker("%s", "VKREND: colour map has no gpu texture, using white");
         }
-        material->textured = BR_FALSE;
         return target->descriptor_set;
     }
 
     sampled_view = texture.view;
-    if (gpu_env_white_view)
+    if (getenv("VKREND_WHITE_TEXTURE_VIEW") != NULL)
         sampled_view = target->white_view;
 
     for (i = 0; i < target->texture_set_count; i++) {
         if (target->texture_sets[i].stored == material->colour_map
             && target->texture_sets[i].view == texture.view
             && target->texture_sets[i].generation == texture.generation) {
-            target->texture_sets[i].used_frame = target->video->frame_epoch;
+            target->texture_sets[i].used_frame = target->frame_sequence;
             target->texture_sets[i].generation = texture.generation;
 
             material->textured = BR_TRUE;
             material->texture_width = texture.width;
             material->texture_height = texture.height;
-            GpuVkCacheMaterial(target, material, i);
-            return target->descriptor_set;
+            return target->texture_sets[i].set;
         }
-        if (target->texture_sets[i].stored == material->colour_map)
-            reuse_index = (br_int_32)i;
     }
 
-    if (reuse_index >= 0) {
-        vk_gpu_texture_set* entry = &target->texture_sets[reuse_index];
+    if (target->texture_set_pool_count == 0) {
+        for (i = 0; i < target->texture_set_count;) {
+            if (target->texture_sets[i].used_frame == target->frame_sequence) {
+                i++;
+                continue;
+            }
 
-        entry->view = texture.view;
-        entry->generation = texture.generation;
-        entry->used_frame = target->video->frame_epoch;
-        GpuVkWriteTextureSlot(target, (br_uint_32)reuse_index, sampled_view);
-        material->textured = BR_TRUE;
-        material->texture_width = texture.width;
-        material->texture_height = texture.height;
-        GpuVkCacheMaterial(target, material, (br_uint_32)reuse_index);
-        return target->descriptor_set;
+            target->texture_set_pool[target->texture_set_pool_count++] = target->texture_sets[i].set;
+            target->texture_sets[i] = target->texture_sets[target->texture_set_count - 1];
+            target->texture_set_count--;
+        }
     }
 
-    if (target->texture_set_count >= VKREND_GPU_TEXTURE_SET_CAPACITY) {
+    if (target->texture_set_pool_count == 0) {
         if (!gpu_texture_capacity_logged) {
             gpu_texture_capacity_logged = BR_TRUE;
             GpuVkLogMarker("%s", "VKREND: texture descriptor cache full, using white");
         }
-        material->textured = BR_FALSE;
         return target->descriptor_set;
     }
 
     {
-        br_uint_32 slot = target->texture_set_count;
-        vk_gpu_texture_set* entry = &target->texture_sets[slot];
+        vk_gpu_texture_set* entry = &target->texture_sets[target->texture_set_count];
 
         entry->stored = material->colour_map;
         entry->view = texture.view;
         entry->generation = texture.generation;
-        entry->used_frame = target->video->frame_epoch;
-        entry->set = target->descriptor_set;
+        entry->used_frame = target->frame_sequence;
+        entry->set = target->texture_set_pool[--target->texture_set_pool_count];
 
-        GpuVkWriteTextureSlot(target, slot, sampled_view);
+        GpuVkWriteSetDescriptors(target, entry->set, sampled_view);
         target->texture_set_count++;
-
-        material->textured = BR_TRUE;
-        material->texture_width = texture.width;
-        material->texture_height = texture.height;
-        GpuVkCacheMaterial(target, material, slot);
     }
 
-    return target->descriptor_set;
+    material->textured = BR_TRUE;
+    material->texture_width = texture.width;
+    material->texture_height = texture.height;
+    return target->texture_sets[target->texture_set_count - 1].set;
 }
 
 static void GpuVkUploadWhiteTexture(vk_gpu_target* target, VkCommandBuffer command_buffer) {
@@ -1880,11 +1731,6 @@ static br_boolean GpuVkBeginScene(vk_gpu_target* target) {
     if (command_buffer == VK_NULL_HANDLE)
         return BR_FALSE;
 
-    GpuVkEnvInit();
-
-    if (gpu_env_prof && gpu_prof_start == 0)
-        gpu_prof_start = clock();
-
     if (!video->scene_recording) {
         if (video->scene_fence_pending) {
             result = gpu.WaitForFences(video->device, 1, &video->scene_fence, VK_TRUE, UINT64_MAX);
@@ -1987,8 +1833,6 @@ static br_boolean GpuVkBeginScene(vk_gpu_target* target) {
     }
 
     gpu.CmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, target->pipeline);
-    gpu.CmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, target->pipeline_layout, 0, 1,
-        &target->descriptor_set, 0, NULL);
 
     target->frame_sequence++;
     target->in_scene = BR_TRUE;
@@ -2013,8 +1857,6 @@ void GpuVkFrameEnd(br_vk_video* video) {
     if (video == NULL || !video->scene_recording)
         return;
 
-    GpuVkEnvInit();
-
     video->scene_recording = BR_FALSE;
 
     if (gpu_disabled)
@@ -2030,9 +1872,6 @@ void GpuVkFrameEnd(br_vk_video* video) {
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &video->scene_command_buffer;
-
-    if (gpu_env_prof)
-        gpu_prof_submit = clock();
 
     result = gpu.QueueSubmit(video->queue, 1, &submit_info, video->scene_fence);
     if (result != VK_SUCCESS) {
@@ -2061,44 +1900,10 @@ void GpuVkFrameEnd(br_vk_video* video) {
         BrLogPrintf("VKREND: gpu frame compositor active\n");
         GpuVkLogMarker("%s", "VKREND: gpu frame compositor active");
     }
-
-    if (gpu_env_prof && gpu_prof_start != 0 && gpu_prof_submit != 0) {
-        static int prof_frames;
-        static double prof_record_sum;
-        static double prof_wait_sum;
-        double record_ms = (gpu_prof_submit - gpu_prof_start) * 1000.0 / CLOCKS_PER_SEC;
-        double wait_ms = (clock() - gpu_prof_submit) * 1000.0 / CLOCKS_PER_SEC;
-
-        prof_record_sum += record_ms;
-        prof_wait_sum += wait_ms;
-        prof_frames++;
-        if (prof_frames >= 300) {
-            BrLogPrintf("VKREND-PROF: record %.2f ms, wait %.2f ms, builds %u, texsets %u, mats %u, draws %u\n",
-                prof_record_sum / prof_frames, prof_wait_sum / prof_frames, sbuffer_build_count,
-                video->present_target != NULL ? video->present_target->texture_set_count : 0,
-                video->present_target != NULL ? video->present_target->material_cache_count : 0,
-                video->present_target != NULL ? video->present_target->frame_draw_count : 0);
-            BrLogPrintf("VKREND-PROF: material %.2f ms/frame (%u calls, %u hits, %u misses)\n",
-                gpu_material_us / prof_frames / 1000.0, gpu_material_calls, gpu_material_hits,
-                gpu_material_misses);
-            sbuffer_build_count = 0;
-            gpu_material_us = 0;
-            gpu_material_calls = 0;
-            gpu_material_hits = 0;
-            gpu_material_misses = 0;
-            prof_record_sum = 0;
-            prof_wait_sum = 0;
-            prof_frames = 0;
-        }
-        gpu_prof_start = 0;
-        gpu_prof_submit = 0;
-    }
 }
 
 VkImageView GpuVkPresentView(br_vk_video* video, struct vk_gpu_target* target) {
-    GpuVkEnvInit();
-
-    if (gpu_env_present_black)
+    if (getenv("VKREND_PRESENT_BLACK") != NULL)
         return VK_NULL_HANDLE;
     if (video == NULL || target == NULL || !gpu_loaded)
         return VK_NULL_HANDLE;
@@ -2267,8 +2072,6 @@ void GpuVkSceneEndRenderer(br_renderer* renderer) {
     vk_gpu_target* target = renderer->gpu_scene;
     br_device_pixelmap* colour;
 
-    GpuVkEnvInit();
-
     renderer->gpu_scene = NULL;
 
     if (target == NULL)
@@ -2295,7 +2098,7 @@ void GpuVkSceneEndRenderer(br_renderer* renderer) {
 
         video->frame_has_scene = BR_TRUE;
 
-        if (gpu_env_submit_per_pass)
+        if (getenv("VKREND_SUBMIT_PER_PASS") != NULL)
             GpuVkFrameEnd(video);
     }
 }
@@ -2497,8 +2300,9 @@ static void GpuVkDrawGeometry(vk_gpu_target* target, br_renderer* renderer, vk_g
 
     for (group = 0; group < geometry->ngroups; group++) {
         vk_gpu_material material;
+        VkDescriptorSet descriptor_set;
+        br_uint_32 ubo_offset;
         br_uint_32 slot;
-        double material_start;
 
         if (geometry->ranges[group].index_count == 0)
             continue;
@@ -2509,15 +2313,14 @@ static void GpuVkDrawGeometry(vk_gpu_target* target, br_renderer* renderer, vk_g
 
         BrMemSet(&material, 0, sizeof(material));
         GpuVkMaterialResolve(model, group, default_state, &material);
-        material_start = gpu_now_us();
-        GpuVkMaterialDescriptor(target, &material);
-        gpu_material_us += gpu_now_us() - material_start;
-        gpu_material_calls++;
+        descriptor_set = GpuVkMaterialDescriptor(target, &material);
 
         GpuVkWriteUbo(target, slot, renderer, &material);
+        ubo_offset = (br_uint_32)((VkDeviceSize)slot * target->ubo_stride);
 
-        gpu.CmdPushConstants(command_buffer, target->pipeline_layout,
-            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(slot), &slot);
+
+        gpu.CmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, target->pipeline_layout, 0, 1,
+            &descriptor_set, 1, &ubo_offset);
 
         target->frame_draw_count++;
 
@@ -2532,11 +2335,9 @@ void GpuVkRenderStored(br_geometry_stored* stored, br_renderer* renderer,
     vk_gpu_geometry* geometry;
     br_vk_video* video;
 
-    GpuVkEnvInit();
-
     if (gpu_disabled || target == NULL || !target->in_scene)
         return;
-    if (gpu_env_no_geometry)
+    if (getenv("VKREND_NO_GEOMETRY") != NULL)
         return;
     if (stored->model == NULL)
         return;
@@ -2568,8 +2369,6 @@ br_boolean GpuVkRenderV1Model(struct v11model* model, struct br_renderer* render
     br_vk_video* video;
     vk_gpu_geometry geometry;
 
-    GpuVkEnvInit();
-
     if (gpu_disabled || renderer == NULL || model == NULL)
         return BR_FALSE;
     if (model->groups == NULL || model->ngroups == 0)
@@ -2578,7 +2377,7 @@ br_boolean GpuVkRenderV1Model(struct v11model* model, struct br_renderer* render
     target = renderer->gpu_scene;
     if (target == NULL || !target->in_scene)
         return BR_FALSE;
-    if (gpu_env_no_geometry)
+    if (getenv("VKREND_NO_GEOMETRY") != NULL)
         return BR_FALSE;
 
     video = target->video;
