@@ -49,6 +49,7 @@ static vk_texture_functions sbuffer_gpu;
 static VkInstance sbuffer_instance;
 static br_boolean sbuffer_loaded;
 static br_int_32 sbuffer_format_supported = -1;
+static br_uint_32 sbuffer_texture_serial;
 
 static br_boolean sbuffer_logged_source;
 static br_boolean sbuffer_logged_type;
@@ -780,7 +781,10 @@ static br_boolean BufferTextureBuild(struct br_buffer_stored* self, br_vk_video*
 
     self->texture.width = width;
     self->texture.height = height;
-    self->texture.generation = self->texture.generation + 1;
+    sbuffer_texture_serial++;
+    if (sbuffer_texture_serial == 0)
+        sbuffer_texture_serial = 1;
+    self->texture.generation = sbuffer_texture_serial;
     self->texture_device = video->device;
     self->built_revision = self->revision;
     self->built_generation = video->generation;

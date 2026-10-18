@@ -1,6 +1,7 @@
 #include "drv.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define VKREND_GPU_UBO_SLOTS 8192
@@ -1478,7 +1479,13 @@ static void GpuVkMaterialResolve(const struct v11model* model, br_uint_16 group_
 
 static VkDescriptorSet GpuVkMaterialDescriptor(vk_gpu_target* target, vk_gpu_material* material) {
     vk_buffer_texture texture;
+    VkImageView sampled_view;
     br_uint_32 i;
+
+    if (getenv("VKREND_WHITE_TEXTURE_SETS") != NULL) {
+        material->textured = BR_FALSE;
+        return target->descriptor_set;
+    }
 
     if (material->colour_map == NULL)
         return target->descriptor_set;
@@ -1491,6 +1498,10 @@ static VkDescriptorSet GpuVkMaterialDescriptor(vk_gpu_target* target, vk_gpu_mat
         }
         return target->descriptor_set;
     }
+
+    sampled_view = texture.view;
+    if (getenv("VKREND_WHITE_TEXTURE_VIEW") != NULL)
+        sampled_view = target->white_view;
 
     for (i = 0; i < target->texture_set_count; i++) {
         if (target->texture_sets[i].stored == material->colour_map
@@ -1536,7 +1547,7 @@ static VkDescriptorSet GpuVkMaterialDescriptor(vk_gpu_target* target, vk_gpu_mat
         entry->used_frame = target->frame_sequence;
         entry->set = target->texture_set_pool[--target->texture_set_pool_count];
 
-        GpuVkWriteSetDescriptors(target, entry->set, texture.view);
+        GpuVkWriteSetDescriptors(target, entry->set, sampled_view);
         target->texture_set_count++;
     }
 
@@ -1892,6 +1903,8 @@ void GpuVkFrameEnd(br_vk_video* video) {
 }
 
 VkImageView GpuVkPresentView(br_vk_video* video, struct vk_gpu_target* target) {
+    if (getenv("VKREND_PRESENT_BLACK") != NULL)
+        return VK_NULL_HANDLE;
     if (video == NULL || target == NULL || !gpu_loaded)
         return VK_NULL_HANDLE;
     if (target->video != video || target->generation != video->generation)
@@ -2084,6 +2097,9 @@ void GpuVkSceneEndRenderer(br_renderer* renderer) {
         }
 
         video->frame_has_scene = BR_TRUE;
+
+        if (getenv("VKREND_SUBMIT_PER_PASS") != NULL)
+            GpuVkFrameEnd(video);
     }
 }
 
@@ -2321,6 +2337,8 @@ void GpuVkRenderStored(br_geometry_stored* stored, br_renderer* renderer,
 
     if (gpu_disabled || target == NULL || !target->in_scene)
         return;
+    if (getenv("VKREND_NO_GEOMETRY") != NULL)
+        return;
     if (stored->model == NULL)
         return;
     if (stored->total_faces == 0 || stored->total_vertices == 0 || stored->total_vertices > 65535)
@@ -2358,6 +2376,8 @@ br_boolean GpuVkRenderV1Model(struct v11model* model, struct br_renderer* render
 
     target = renderer->gpu_scene;
     if (target == NULL || !target->in_scene)
+        return BR_FALSE;
+    if (getenv("VKREND_NO_GEOMETRY") != NULL)
         return BR_FALSE;
 
     video = target->video;

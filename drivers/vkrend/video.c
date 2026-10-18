@@ -3,6 +3,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "vkshaders.h"
 
@@ -88,14 +94,27 @@ static PFN_vkWaitForFences pWaitForFences;
 static PFN_vkResetFences pResetFences;
 static PFN_vkCreateSemaphore pCreateSemaphore;
 static PFN_vkDestroySemaphore pDestroySemaphore;
+static br_boolean video_recovering;
 
 static br_error video_fail(const char* stage, VkResult result) {
+    if (video_recovering) {
+        BrLogPrintf("VKREND: %s failed during recovery (VkResult %d)\n", (char*)stage, (int)result);
+        return BRE_FAIL;
+    }
     BrFailure("VKREND: %s failed (VkResult %d)", (char*)stage, (int)result);
     return BRE_FAIL;
 }
 
 static br_boolean video_host_failed(br_boolean result) {
     return (result != 0) ? BR_TRUE : BR_FALSE;
+}
+
+static void video_terminal_wait(void) {
+#ifdef _WIN32
+    Sleep(1000);
+#else
+    sleep(1);
+#endif
 }
 
 static br_boolean video_copy_callbacks(br_vk_video* video, const br_device_vkrend_callback_procs* callbacks) {
@@ -1524,17 +1543,23 @@ static br_error video_recover_device_lost(br_vk_video* video) {
     br_int_32 width = video->window_width;
     br_int_32 height = video->window_height;
     br_int_32 attempts = video->recovery_attempted;
+    br_uint_32 present_serial = video->present_serial;
+    br_uint_32 recovery_serial = video->recovery_serial;
+    br_uint_32 recovery_cooldown = video->recovery_cooldown;
+    br_uint_32 stable_frames = video->recovery_stable_frames;
 
-    if (video->recovery_exhausted)
+    if (video->gpu_failed || video->recovery_exhausted)
         return BRE_FAIL;
 
-    if (video->present_serial != 0 && video->recovery_serial == video->present_serial)
+    if (present_serial != 0 && recovery_serial == present_serial)
         return BRE_FAIL;
 
     if (attempts >= 8) {
-        BrLogPrintf("VKREND: device lost recovery budget exhausted\n");
+        BrLogPrintf("VKREND: device lost recovery budget exhausted; rendering suspended\n");
         video->recovery_exhausted = BR_TRUE;
+        video->gpu_failed = BR_TRUE;
         video->recovery_cooldown = 0;
+        video->recovery_retry_time = (br_uint_32)time(NULL) + 10;
         video->present_target = NULL;
         video->frame_has_scene = BR_FALSE;
         return BRE_FAIL;
@@ -1546,19 +1571,35 @@ static br_error video_recover_device_lost(br_vk_video* video) {
 
     GpuVkResetDeferred();
 
+    video_recovering = BR_TRUE;
     VIDEOVkDestroy(video);
 
     if (VIDEOVkCreate(video, &callbacks, width, height) != BRE_OK) {
-        BrLogPrintf("VKREND: reinitialisation after device loss failed\n");
+        video_recovering = BR_FALSE;
+        BrLogPrintf("VKREND: reinitialisation after device loss failed; rendering suspended\n");
+        video->callbacks = callbacks;
+        video->window_width = width;
+        video->window_height = height;
+        video->recovery_attempted = attempts + 1;
+        video->recovery_exhausted = BR_TRUE;
+        video->gpu_failed = BR_TRUE;
+        video->recovery_retry_time = (br_uint_32)time(NULL) + 10;
         return BRE_FAIL;
     }
+    video_recovering = BR_FALSE;
 
     GpuVkResetAfterRecovery();
     BufferStoredVkResetAfterRecovery();
 
+    video->present_serial = present_serial;
+    video->recovery_serial = present_serial;
+    video->recovery_cooldown = recovery_cooldown;
+    video->recovery_stable_frames = stable_frames;
     video->present_target = NULL;
     video->frame_has_scene = BR_FALSE;
-    video->recovery_stable_frames = 0;
+    video->recovery_exhausted = BR_FALSE;
+    video->gpu_failed = BR_FALSE;
+    video->recovery_retry_time = 0;
     video->recovery_attempted = attempts + 1;
     return BRE_OK;
 }
@@ -1588,11 +1629,23 @@ static br_error video_present_frame(br_vk_video* video, const void* pixels, br_i
 
     video->present_serial++;
 
-    if (video->recovery_exhausted) {
-        if (++video->recovery_cooldown >= 600) {
-            video->recovery_cooldown = 0;
-            video->recovery_exhausted = BR_FALSE;
-            video->recovery_attempted = 0;
+    if (video->gpu_failed) {
+        BrLogPrintf("VKREND: GPU rendering suspended; close the process to exit or wait for recovery\n");
+        for (;;) {
+            video_terminal_wait();
+            if (video->recovery_retry_time != 0
+                && (br_uint_32)time(NULL) >= video->recovery_retry_time) {
+                video->gpu_failed = BR_FALSE;
+                video->recovery_exhausted = BR_FALSE;
+                video->recovery_attempted = 0;
+                video->recovery_serial = 0;
+                video->recovery_retry_time = 0;
+                if (video_recover_device_lost(video) == BRE_OK)
+                    return BRE_OK;
+                BrLogPrintf("VKREND: recovery failed again; rendering stays suspended\n");
+                video->gpu_failed = BR_TRUE;
+                video->recovery_retry_time = (br_uint_32)time(NULL) + 10;
+            }
         }
     }
 
@@ -1604,8 +1657,9 @@ static br_error video_present_frame(br_vk_video* video, const void* pixels, br_i
 
     result = pWaitForFences(video->device, 1, &video->fence, VK_TRUE, UINT64_MAX);
     if (result == VK_ERROR_DEVICE_LOST) {
-        video_recover_device_lost(video);
-        return BRE_OK;
+        if (video_recover_device_lost(video) == BRE_OK)
+            return BRE_OK;
+        return BRE_FAIL;
     }
     if (result != VK_SUCCESS)
         return video_fail("vkWaitForFences", result);
@@ -1623,8 +1677,9 @@ static br_error video_present_frame(br_vk_video* video, const void* pixels, br_i
         return BRE_OK;
     }
     if (result == VK_ERROR_DEVICE_LOST) {
-        video_recover_device_lost(video);
-        return BRE_OK;
+        if (video_recover_device_lost(video) == BRE_OK)
+            return BRE_OK;
+        return BRE_FAIL;
     }
     if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
         return video_fail("vkAcquireNextImageKHR", result);
@@ -1727,8 +1782,9 @@ static br_error video_present_frame(br_vk_video* video, const void* pixels, br_i
 
     result = pQueueSubmit(video->queue, 1, &submit_info, video->fence);
     if (result == VK_ERROR_DEVICE_LOST) {
-        video_recover_device_lost(video);
-        return BRE_OK;
+        if (video_recover_device_lost(video) == BRE_OK)
+            return BRE_OK;
+        return BRE_FAIL;
     }
     if (result != VK_SUCCESS)
         return video_fail("vkQueueSubmit", result);
@@ -1743,8 +1799,9 @@ static br_error video_present_frame(br_vk_video* video, const void* pixels, br_i
 
     result = pQueuePresentKHR(video->queue, &present_info);
     if (result == VK_ERROR_DEVICE_LOST) {
-        video_recover_device_lost(video);
-        return BRE_OK;
+        if (video_recover_device_lost(video) == BRE_OK)
+            return BRE_OK;
+        return BRE_FAIL;
     }
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
         if (video_recreate_swapchain(video) != BRE_OK)

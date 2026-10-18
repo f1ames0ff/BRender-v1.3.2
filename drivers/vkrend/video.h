@@ -81,9 +81,11 @@ typedef struct br_vk_video {
     br_int_32 recovery_attempted;
     br_uint_32 recovery_stable_frames;
     br_boolean recovery_exhausted;
+    br_boolean gpu_failed;
     br_uint_32 present_serial;
     br_uint_32 recovery_serial;
     br_uint_32 recovery_cooldown;
+    br_uint_32 recovery_retry_time;
     br_uint_32 generation;
 } br_vk_video;
 
