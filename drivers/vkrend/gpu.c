@@ -3,6 +3,83 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <time.h>
+#endif
+
+static br_boolean gpu_prof_checked;
+static br_boolean gpu_prof_enabled;
+static br_boolean gpu_prof_active;
+static FILE* gpu_prof_file;
+static double gpu_prof_start_us;
+static double gpu_prof_submit_us;
+static br_uint_32 gpu_prof_frame;
+static br_uint_32 gpu_prof_passes;
+static br_uint_32 gpu_prof_draws;
+static br_uint_32 gpu_prof_geom_uploads;
+extern br_uint_32 sbuffer_build_count;
+
+static double GpuProfNowUs(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
+
+    if (frequency.QuadPart == 0)
+        QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart * 1000000.0 / (double)frequency.QuadPart;
+#else
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000000.0 + (double)ts.tv_nsec / 1000.0;
+#endif
+}
+
+static void GpuProfBegin(void) {
+    if (!gpu_prof_checked) {
+        gpu_prof_checked = BR_TRUE;
+        gpu_prof_enabled = getenv("VKREND_PROFILE") != NULL;
+        if (gpu_prof_enabled) {
+            gpu_prof_file = fopen("vkrend_profile_gpu.csv", "w");
+            if (gpu_prof_file != NULL)
+                fprintf(gpu_prof_file, "frame,scene_us,wait_us,passes,draws,tex_builds,geom_uploads\n");
+        }
+    }
+
+    if (!gpu_prof_enabled)
+        return;
+
+    gpu_prof_start_us = GpuProfNowUs();
+    gpu_prof_submit_us = 0.0;
+    gpu_prof_passes = 0;
+    gpu_prof_draws = 0;
+    gpu_prof_active = BR_TRUE;
+}
+
+static void GpuProfEnd(void) {
+    double now;
+
+    if (!gpu_prof_enabled || !gpu_prof_active)
+        return;
+
+    now = GpuProfNowUs();
+    gpu_prof_active = BR_FALSE;
+
+    if (gpu_prof_file != NULL) {
+        fprintf(gpu_prof_file, "%u,%.3f,%.3f,%u,%u,%u,%u\n", ++gpu_prof_frame,
+            gpu_prof_submit_us > 0.0 ? gpu_prof_submit_us - gpu_prof_start_us : 0.0,
+            gpu_prof_submit_us > 0.0 ? now - gpu_prof_submit_us : 0.0,
+            gpu_prof_passes, gpu_prof_draws, sbuffer_build_count, gpu_prof_geom_uploads);
+        if ((gpu_prof_frame & 63) == 0)
+            fflush(gpu_prof_file);
+    }
+
+    sbuffer_build_count = 0;
+    gpu_prof_geom_uploads = 0;
+}
 
 #define VKREND_GPU_UBO_SLOTS 8192
 #define VKREND_GPU_UBO_STRIDE 256
@@ -1731,6 +1808,11 @@ static br_boolean GpuVkBeginScene(vk_gpu_target* target) {
     if (command_buffer == VK_NULL_HANDLE)
         return BR_FALSE;
 
+    if (!video->scene_recording)
+        GpuProfBegin();
+    if (gpu_prof_enabled)
+        gpu_prof_passes++;
+
     if (!video->scene_recording) {
         if (video->scene_fence_pending) {
             result = gpu.WaitForFences(video->device, 1, &video->scene_fence, VK_TRUE, UINT64_MAX);
@@ -1873,6 +1955,9 @@ void GpuVkFrameEnd(br_vk_video* video) {
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &video->scene_command_buffer;
 
+    if (gpu_prof_enabled)
+        gpu_prof_submit_us = GpuProfNowUs();
+
     result = gpu.QueueSubmit(video->queue, 1, &submit_info, video->scene_fence);
     if (result != VK_SUCCESS) {
         GpuVkHandleDeviceLost(video, "scene queue submit", result);
@@ -1894,6 +1979,8 @@ void GpuVkFrameEnd(br_vk_video* video) {
     }
 
     video->scene_fence_pending = BR_FALSE;
+
+    GpuProfEnd();
 
     if (!gpu_frame_logged) {
         gpu_frame_logged = BR_TRUE;
@@ -2124,6 +2211,10 @@ void GpuVkGeometryRelease(vk_gpu_geometry* geometry) {
 
 static br_boolean GpuVkGeometryUpload(vk_gpu_geometry* geometry, const struct v11model* model) {
     br_uint_32 total_vertices = 0;
+
+    if (gpu_prof_enabled)
+        gpu_prof_geom_uploads++;
+
     br_uint_32 total_faces = 0;
     br_uint_32 index_offset = 0;
     br_uint_16 vertex_offset = 0;
@@ -2321,6 +2412,9 @@ static void GpuVkDrawGeometry(vk_gpu_target* target, br_renderer* renderer, vk_g
 
         gpu.CmdBindDescriptorSets(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, target->pipeline_layout, 0, 1,
             &descriptor_set, 1, &ubo_offset);
+
+        if (gpu_prof_enabled)
+            gpu_prof_draws++;
 
         target->frame_draw_count++;
 
