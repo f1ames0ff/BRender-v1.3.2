@@ -303,13 +303,20 @@ static void GpuVkDisable(const char* stage) {
     GpuVkLogMarker("VKREND: gpu path failed at %s, falling back to record-only", stage);
 }
 
-static br_boolean GpuVkHandleDeviceLost(br_vk_video* video, const char* stage, VkResult result) {
+static void GpuVkHandleDeviceLost(br_vk_video* video, const char* stage, VkResult result) {
     GpuVkRecordResult(stage, result);
 
     if (result == VK_ERROR_DEVICE_LOST && VIDEOVkDeviceLost(video) == BRE_OK)
-        return BR_TRUE;
+        return;
 
     GpuVkDisable(stage);
+}
+
+static br_boolean GpuVkCheckResult(br_vk_video* video, const char* stage, VkResult result) {
+    if (result == VK_SUCCESS)
+        return BR_TRUE;
+
+    GpuVkHandleDeviceLost(video, stage, result);
     return BR_FALSE;
 }
 
@@ -1816,34 +1823,26 @@ static br_boolean GpuVkBeginScene(vk_gpu_target* target) {
     if (!video->scene_recording) {
         if (video->scene_fence_pending) {
             result = gpu.WaitForFences(video->device, 1, &video->scene_fence, VK_TRUE, UINT64_MAX);
-            if (result != VK_SUCCESS) {
-                GpuVkHandleDeviceLost(video, "scene fence wait", result);
+            if (!GpuVkCheckResult(video, "scene fence wait", result))
                 return BR_FALSE;
-            }
 
             result = gpu.ResetFences(video->device, 1, &video->scene_fence);
-            if (result != VK_SUCCESS) {
-                GpuVkHandleDeviceLost(video, "scene fence reset", result);
+            if (!GpuVkCheckResult(video, "scene fence reset", result))
                 return BR_FALSE;
-            }
 
             video->scene_fence_pending = BR_FALSE;
         }
 
         result = gpu.WaitForFences(video->device, 1, &video->fence, VK_TRUE, UINT64_MAX);
-        if (result != VK_SUCCESS) {
-            GpuVkHandleDeviceLost(video, "present fence wait", result);
+        if (!GpuVkCheckResult(video, "present fence wait", result))
             return BR_FALSE;
-        }
 
         GpuVkFlushDeferred();
         video->pixel_slot = 0;
 
         result = gpu.ResetCommandBuffer(command_buffer, 0);
-        if (result != VK_SUCCESS) {
-            GpuVkHandleDeviceLost(video, "scene command buffer reset", result);
+        if (!GpuVkCheckResult(video, "scene command buffer reset", result))
             return BR_FALSE;
-        }
 
         GpuVkRetireFlush(target);
 
@@ -1852,10 +1851,8 @@ static br_boolean GpuVkBeginScene(vk_gpu_target* target) {
         begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
         result = gpu.BeginCommandBuffer(command_buffer, &begin_info);
-        if (result != VK_SUCCESS) {
-            GpuVkHandleDeviceLost(video, "scene command buffer begin", result);
+        if (!GpuVkCheckResult(video, "scene command buffer begin", result))
             return BR_FALSE;
-        }
 
         video->scene_recording = BR_TRUE;
         video->frame_epoch++;
@@ -1946,10 +1943,8 @@ void GpuVkFrameEnd(br_vk_video* video) {
         return;
 
     result = gpu.EndCommandBuffer(video->scene_command_buffer);
-    if (result != VK_SUCCESS) {
-        GpuVkHandleDeviceLost(video, "scene command buffer end", result);
+    if (!GpuVkCheckResult(video, "scene command buffer end", result))
         return;
-    }
 
     BrMemSet(&submit_info, 0, sizeof(submit_info));
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -1960,24 +1955,18 @@ void GpuVkFrameEnd(br_vk_video* video) {
         gpu_prof_submit_us = GpuProfNowUs();
 
     result = gpu.QueueSubmit(video->queue, 1, &submit_info, video->scene_fence);
-    if (result != VK_SUCCESS) {
-        GpuVkHandleDeviceLost(video, "scene queue submit", result);
+    if (!GpuVkCheckResult(video, "scene queue submit", result))
         return;
-    }
 
     video->scene_fence_pending = BR_TRUE;
 
     result = gpu.WaitForFences(video->device, 1, &video->scene_fence, VK_TRUE, UINT64_MAX);
-    if (result != VK_SUCCESS) {
-        GpuVkHandleDeviceLost(video, "scene fence wait", result);
+    if (!GpuVkCheckResult(video, "scene fence wait", result))
         return;
-    }
 
     result = gpu.ResetFences(video->device, 1, &video->scene_fence);
-    if (result != VK_SUCCESS) {
-        GpuVkHandleDeviceLost(video, "scene fence reset", result);
+    if (!GpuVkCheckResult(video, "scene fence reset", result))
         return;
-    }
 
     video->scene_fence_pending = BR_FALSE;
 
