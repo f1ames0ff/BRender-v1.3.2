@@ -1634,7 +1634,7 @@ static VkDescriptorSet GpuVkMaterialDescriptor(vk_gpu_target* target, vk_gpu_mat
     return target->texture_sets[target->texture_set_count - 1].set;
 }
 
-static void GpuVkUploadWhiteTexture(vk_gpu_target* target, VkCommandBuffer command_buffer) {
+static void GpuVkEnsureWhiteTexture(vk_gpu_target* target, VkCommandBuffer command_buffer) {
     VkBufferMemoryBarrier buffer_barrier;
     VkImageMemoryBarrier image_barrier;
     VkBufferImageCopy region;
@@ -1876,7 +1876,8 @@ static br_boolean GpuVkBeginScene(vk_gpu_target* target) {
         overlay_drawn = GpuVkUploadOverlayUnder(target, command_buffer);
     }
 
-    GpuVkUploadWhiteTexture(target, command_buffer);
+    if (!target->white_ready)
+        GpuVkEnsureWhiteTexture(target, command_buffer);
 
     BrMemSet(clear_values, 0, sizeof(clear_values));
     clear_values[1].depthStencil.depth = 1.0f;
