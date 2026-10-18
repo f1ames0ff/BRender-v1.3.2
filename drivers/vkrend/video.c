@@ -633,8 +633,12 @@ static br_error video_create_device(br_vk_video* video) {
     float priority = 1.0f;
     VkDeviceQueueCreateInfo queue_info;
     VkDeviceCreateInfo device_info;
+    VkPhysicalDeviceFeatures features;
     const char* extensions[1];
     VkResult result;
+
+    BrMemSet(&features, 0, sizeof(features));
+    features.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
 
     BrMemSet(&queue_info, 0, sizeof(queue_info));
     queue_info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -650,6 +654,7 @@ static br_error video_create_device(br_vk_video* video) {
     device_info.pQueueCreateInfos = &queue_info;
     device_info.enabledExtensionCount = 1;
     device_info.ppEnabledExtensionNames = extensions;
+    device_info.pEnabledFeatures = &features;
 
     result = pCreateDevice(video->physical_device, &device_info, NULL, &video->device);
     if (result != VK_SUCCESS)

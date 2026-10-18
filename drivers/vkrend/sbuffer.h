@@ -20,6 +20,7 @@ typedef struct vk_buffer_texture {
 } vk_buffer_texture;
 
 br_boolean BufferStoredVkGetTexture(struct br_buffer_stored* stored, br_vk_video* video, vk_buffer_texture* texture);
+br_uint_32 BufferStoredVkTextureGeneration(struct br_buffer_stored* stored);
 void BufferStoredVkResetAfterRecovery(void);
 
 #ifdef BR_BUFFER_STORED_PRIVATE

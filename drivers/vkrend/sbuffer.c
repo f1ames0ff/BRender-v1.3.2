@@ -43,6 +43,8 @@ typedef struct vk_texture_functions {
     PFN_vkCreateCommandPool CreateCommandPool;
     PFN_vkDestroyCommandPool DestroyCommandPool;
     PFN_vkAllocateCommandBuffers AllocateCommandBuffers;
+    PFN_vkResetCommandPool ResetCommandPool;
+    PFN_vkResetFences ResetFences;
 } vk_texture_functions;
 
 static vk_texture_functions sbuffer_gpu;
@@ -50,6 +52,12 @@ static VkInstance sbuffer_instance;
 static br_boolean sbuffer_loaded;
 static br_int_32 sbuffer_format_supported = -1;
 static br_uint_32 sbuffer_texture_serial;
+br_uint_32 sbuffer_build_count;
+
+static VkDevice sbuffer_upload_device;
+static VkCommandPool sbuffer_upload_pool;
+static VkCommandBuffer sbuffer_upload_command_buffer;
+static VkFence sbuffer_upload_fence;
 
 static br_boolean sbuffer_logged_source;
 static br_boolean sbuffer_logged_type;
@@ -84,6 +92,10 @@ void BufferStoredVkResetAfterRecovery(void) {
     sbuffer_logged_allocation = BR_FALSE;
     sbuffer_logged_upload = BR_FALSE;
     sbuffer_logged_device = BR_FALSE;
+    sbuffer_upload_device = VK_NULL_HANDLE;
+    sbuffer_upload_pool = VK_NULL_HANDLE;
+    sbuffer_upload_command_buffer = VK_NULL_HANDLE;
+    sbuffer_upload_fence = VK_NULL_HANDLE;
 }
 
 static br_boolean BufferTextureLoadFunctions(VkInstance instance) {
@@ -134,6 +146,8 @@ static br_boolean BufferTextureLoadFunctions(VkInstance instance) {
     VKREND_TEXTURE_LOAD(CreateCommandPool);
     VKREND_TEXTURE_LOAD(DestroyCommandPool);
     VKREND_TEXTURE_LOAD(AllocateCommandBuffers);
+    VKREND_TEXTURE_LOAD(ResetCommandPool);
+    VKREND_TEXTURE_LOAD(ResetFences);
 
 #undef VKREND_TEXTURE_LOAD
 
@@ -320,40 +334,63 @@ static br_boolean BufferTextureCreateStaging(br_vk_video* video, br_uint_32 byte
 static br_boolean BufferTextureUpload(br_vk_video* video, VkImage image, VkBuffer staging, br_uint_32 width,
     br_uint_32 height, br_boolean reuse) {
     VkCommandPoolCreateInfo pool_info;
-    VkCommandPool pool = VK_NULL_HANDLE;
     VkCommandBufferAllocateInfo allocate_info;
-    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
     VkCommandBufferBeginInfo begin_info;
     VkImageMemoryBarrier barrier;
     VkBufferImageCopy region;
     VkFenceCreateInfo fence_info;
-    VkFence fence = VK_NULL_HANDLE;
     VkSubmitInfo submit_info;
-    br_boolean submitted = BR_FALSE;
-    br_boolean waited = BR_FALSE;
     br_boolean ok = BR_FALSE;
 
-    BrMemSet(&pool_info, 0, sizeof(pool_info));
-    pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    pool_info.queueFamilyIndex = video->queue_family;
+    if (sbuffer_upload_device != video->device) {
+        sbuffer_upload_device = video->device;
+        sbuffer_upload_pool = VK_NULL_HANDLE;
+        sbuffer_upload_command_buffer = VK_NULL_HANDLE;
+        sbuffer_upload_fence = VK_NULL_HANDLE;
+    }
 
-    if (sbuffer_gpu.CreateCommandPool(video->device, &pool_info, NULL, &pool) != VK_SUCCESS)
-        goto done;
+    if (sbuffer_upload_pool == VK_NULL_HANDLE) {
+        BrMemSet(&pool_info, 0, sizeof(pool_info));
+        pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        pool_info.queueFamilyIndex = video->queue_family;
 
-    BrMemSet(&allocate_info, 0, sizeof(allocate_info));
-    allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocate_info.commandPool = pool;
-    allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocate_info.commandBufferCount = 1;
+        if (sbuffer_gpu.CreateCommandPool(video->device, &pool_info, NULL, &sbuffer_upload_pool) != VK_SUCCESS)
+            goto done;
 
-    if (sbuffer_gpu.AllocateCommandBuffers(video->device, &allocate_info, &command_buffer) != VK_SUCCESS)
-        goto done;
+        BrMemSet(&allocate_info, 0, sizeof(allocate_info));
+        allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocate_info.commandPool = sbuffer_upload_pool;
+        allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocate_info.commandBufferCount = 1;
+
+        if (sbuffer_gpu.AllocateCommandBuffers(video->device, &allocate_info, &sbuffer_upload_command_buffer)
+            != VK_SUCCESS) {
+            sbuffer_gpu.DestroyCommandPool(video->device, sbuffer_upload_pool, NULL);
+            sbuffer_upload_pool = VK_NULL_HANDLE;
+            goto done;
+        }
+
+        BrMemSet(&fence_info, 0, sizeof(fence_info));
+        fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+
+        if (sbuffer_gpu.CreateFence(video->device, &fence_info, NULL, &sbuffer_upload_fence) != VK_SUCCESS) {
+            sbuffer_gpu.DestroyCommandPool(video->device, sbuffer_upload_pool, NULL);
+            sbuffer_upload_pool = VK_NULL_HANDLE;
+            sbuffer_upload_command_buffer = VK_NULL_HANDLE;
+            goto done;
+        }
+    } else {
+        if (sbuffer_gpu.ResetCommandPool(video->device, sbuffer_upload_pool, 0) != VK_SUCCESS)
+            goto done;
+        if (sbuffer_gpu.ResetFences(video->device, 1, &sbuffer_upload_fence) != VK_SUCCESS)
+            goto done;
+    }
 
     BrMemSet(&begin_info, 0, sizeof(begin_info));
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-    if (sbuffer_gpu.BeginCommandBuffer(command_buffer, &begin_info) != VK_SUCCESS)
+    if (sbuffer_gpu.BeginCommandBuffer(sbuffer_upload_command_buffer, &begin_info) != VK_SUCCESS)
         goto done;
 
     BrMemSet(&barrier, 0, sizeof(barrier));
@@ -369,8 +406,8 @@ static br_boolean BufferTextureUpload(br_vk_video* video, VkImage image, VkBuffe
     barrier.srcAccessMask = reuse ? VK_ACCESS_SHADER_READ_BIT : 0;
     barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
-    sbuffer_gpu.CmdPipelineBarrier(command_buffer, reuse ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
-                                                        : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+    sbuffer_gpu.CmdPipelineBarrier(sbuffer_upload_command_buffer,
+        reuse ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
 
     BrMemSet(&region, 0, sizeof(region));
@@ -380,45 +417,40 @@ static br_boolean BufferTextureUpload(br_vk_video* video, VkImage image, VkBuffe
     region.imageExtent.height = height;
     region.imageExtent.depth = 1;
 
-    sbuffer_gpu.CmdCopyBufferToImage(command_buffer, staging, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    sbuffer_gpu.CmdCopyBufferToImage(sbuffer_upload_command_buffer, staging, image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
-    sbuffer_gpu.CmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        0, 0, NULL, 0, NULL, 1, &barrier);
+    sbuffer_gpu.CmdPipelineBarrier(sbuffer_upload_command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &barrier);
 
-    if (sbuffer_gpu.EndCommandBuffer(command_buffer) != VK_SUCCESS)
-        goto done;
-
-    BrMemSet(&fence_info, 0, sizeof(fence_info));
-    fence_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-
-    if (sbuffer_gpu.CreateFence(video->device, &fence_info, NULL, &fence) != VK_SUCCESS)
+    if (sbuffer_gpu.EndCommandBuffer(sbuffer_upload_command_buffer) != VK_SUCCESS)
         goto done;
 
     BrMemSet(&submit_info, 0, sizeof(submit_info));
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &command_buffer;
+    submit_info.pCommandBuffers = &sbuffer_upload_command_buffer;
 
-    if (sbuffer_gpu.QueueSubmit(video->queue, 1, &submit_info, fence) != VK_SUCCESS)
+    if (sbuffer_gpu.QueueSubmit(video->queue, 1, &submit_info, sbuffer_upload_fence) != VK_SUCCESS)
         goto done;
 
-    submitted = BR_TRUE;
-    waited = sbuffer_gpu.WaitForFences(video->device, 1, &fence, VK_TRUE, UINT64_MAX) == VK_SUCCESS;
-    ok = waited;
+    if (sbuffer_gpu.WaitForFences(video->device, 1, &sbuffer_upload_fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS)
+        goto done;
+
+    ok = BR_TRUE;
 
 done:
-    if (fence != VK_NULL_HANDLE && (!submitted || waited))
-        sbuffer_gpu.DestroyFence(video->device, fence, NULL);
-    if (pool != VK_NULL_HANDLE && (!submitted || waited))
-        sbuffer_gpu.DestroyCommandPool(video->device, pool, NULL);
-
-    if (!ok)
+    if (!ok) {
         BufferTextureLogOnce(&sbuffer_logged_upload, "colour map upload failed");
+        sbuffer_upload_pool = VK_NULL_HANDLE;
+        sbuffer_upload_command_buffer = VK_NULL_HANDLE;
+        sbuffer_upload_fence = VK_NULL_HANDLE;
+    }
 
     return ok;
 }
@@ -717,6 +749,7 @@ static br_boolean BufferTextureBuild(struct br_buffer_stored* self, br_vk_video*
     if (!BufferTextureSourceSupported(source, palette, clut))
         return BR_FALSE;
 
+    sbuffer_build_count++;
     self->video = video;
 
     if (self->texture.image != VK_NULL_HANDLE && self->texture_device != video->device) {
@@ -852,6 +885,10 @@ br_boolean BufferStoredVkGetTexture(struct br_buffer_stored* stored, br_vk_video
     *texture = stored->texture;
 
     return BR_TRUE;
+}
+
+br_uint_32 BufferStoredVkTextureGeneration(struct br_buffer_stored* stored) {
+    return stored != NULL ? stored->texture.generation : 0;
 }
 
 struct br_buffer_stored* BufferStoredVkAllocate(br_renderer* renderer, br_token use, struct br_device_pixelmap* pm,
